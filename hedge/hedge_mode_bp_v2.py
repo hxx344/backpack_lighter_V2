@@ -908,9 +908,16 @@ class HedgeBot:
                         self.backpack_best_ask_size = self.backpack_order_book['asks'][best_ask_price]
 
                     if not self.backpack_order_book_ready:
-                        self.backpack_order_book_ready = True
-                        self.logger.info(f"📊 Backpack order book ready - Best bid: {self.backpack_best_bid}, "
-                                         f"Best ask: {self.backpack_best_ask}")
+                        # Only mark as ready when BOTH sides have valid data
+                        if (self.backpack_best_bid is not None and self.backpack_best_ask is not None
+                                and self.backpack_best_bid > 0 and self.backpack_best_ask > 0
+                                and self.backpack_best_bid < self.backpack_best_ask):
+                            self.backpack_order_book_ready = True
+                            self.logger.info(f"📊 Backpack order book ready - Best bid: {self.backpack_best_bid}, "
+                                             f"Best ask: {self.backpack_best_ask}")
+                        else:
+                            self.logger.debug(f"📊 Backpack order book partial - Best bid: {self.backpack_best_bid}, "
+                                              f"Best ask: {self.backpack_best_ask} (waiting for both sides)")
 
         except Exception as e:
             self.logger.error(f"Error handling Backpack order book update: {e}")
