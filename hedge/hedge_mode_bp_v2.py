@@ -296,10 +296,37 @@ class HedgeBot:
         lt_total_volume = self.lt_buy_cost_quote + self.lt_sell_revenue_quote
         combined_volume = bp_total_volume + lt_total_volume
 
-        # Calculate P&L per exchange
-        # P&L = sell_revenue - buy_cost + unrealized (position * current_price)
-        bp_realized_pnl = self.bp_sell_revenue_quote - self.bp_buy_cost_quote
-        lt_realized_pnl = self.lt_sell_revenue_quote - self.lt_buy_cost_quote
+        # Calculate realized P&L per exchange (only matched portion counts)
+        # Realized = matched_qty * (avg_sell_price - avg_buy_price)
+        # Unmatched portion is unrealized (open position from trades)
+        bp_realized_pnl = Decimal('0')
+        if self.bp_buy_volume_base > 0 and self.bp_sell_volume_base > 0:
+            matched_qty = min(self.bp_buy_volume_base, self.bp_sell_volume_base)
+            avg_buy = self.bp_buy_cost_quote / self.bp_buy_volume_base
+            avg_sell = self.bp_sell_revenue_quote / self.bp_sell_volume_base
+            bp_realized_pnl = matched_qty * (avg_sell - avg_buy)
+
+        lt_realized_pnl = Decimal('0')
+        if self.lt_buy_volume_base > 0 and self.lt_sell_volume_base > 0:
+            matched_qty = min(self.lt_buy_volume_base, self.lt_sell_volume_base)
+            avg_buy = self.lt_buy_cost_quote / self.lt_buy_volume_base
+            avg_sell = self.lt_sell_revenue_quote / self.lt_sell_volume_base
+            lt_realized_pnl = matched_qty * (avg_sell - avg_buy)
+
+        # Combined realized P&L across both exchanges (hedging pair P&L)
+        # For a hedging bot: buy on one exchange, sell on the other
+        # Combined realized = matched_qty * (avg_sell_all - avg_buy_all)
+        total_buy_base = self.bp_buy_volume_base + self.lt_buy_volume_base
+        total_sell_base = self.bp_sell_volume_base + self.lt_sell_volume_base
+        total_buy_cost = self.bp_buy_cost_quote + self.lt_buy_cost_quote
+        total_sell_revenue = self.bp_sell_revenue_quote + self.lt_sell_revenue_quote
+
+        combined_realized_pnl = Decimal('0')
+        if total_buy_base > 0 and total_sell_base > 0:
+            matched_qty = min(total_buy_base, total_sell_base)
+            avg_buy_all = total_buy_cost / total_buy_base
+            avg_sell_all = total_sell_revenue / total_sell_base
+            combined_realized_pnl = matched_qty * (avg_sell_all - avg_buy_all)
 
         # Unrealized P&L based on current positions and mid prices
         bp_unrealized = Decimal('0')
@@ -311,10 +338,9 @@ class HedgeBot:
             lt_mid = (self.lighter_best_bid + self.lighter_best_ask) / 2
             lt_unrealized = self.lighter_position * lt_mid
 
-        total_realized = bp_realized_pnl + lt_realized_pnl
         total_unrealized = bp_unrealized + lt_unrealized
-        # Estimated total P&L = realized + unrealized
-        estimated_pnl = total_realized + total_unrealized
+        # Estimated total P&L = combined realized + unrealized
+        estimated_pnl = combined_realized_pnl + total_unrealized
 
         total_trades = self.bp_trade_count + self.lt_trade_count
 
@@ -332,7 +358,7 @@ class HedgeBot:
         self.logger.info(f"   交易额: {lt_total_volume:.2f} USDT | 已实现盈亏: {lt_realized_pnl:+.4f} USDT")
         self.logger.info("-"*60)
         self.logger.info(f"💰 合计: 交易 {total_trades} 笔 | 总交易额: {combined_volume:.2f} USDT")
-        self.logger.info(f"   已实现盈亏: {total_realized:+.4f} USDT")
+        self.logger.info(f"   跨所对冲已实现盈亏: {combined_realized_pnl:+.4f} USDT")
         self.logger.info(f"   未实现盈亏: {total_unrealized:+.4f} USDT (BP仓位: {self.backpack_position} | LT仓位: {self.lighter_position})")
         self.logger.info(f"   估计总盈亏: {estimated_pnl:+.4f} USDT")
         self.logger.info("="*60)
