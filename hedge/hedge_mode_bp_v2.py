@@ -1124,7 +1124,7 @@ class HedgeBot:
         return current_position
 
     async def check_position_balance(self, log_position: bool = True) -> bool:
-        """Check if positions on both exchanges are balanced."""
+        """Check if positions on both exchanges are balanced. If not, auto-rebalance."""
         attempts = 0
         position_is_balanced = False
         while attempts < 4:
@@ -1134,13 +1134,57 @@ class HedgeBot:
             if log_position:
                 self.logger.info(f"Backpack position: {self.backpack_position} | Lighter position: {self.lighter_position}")
 
-            if abs(self.backpack_position + self.lighter_position) > self.order_quantity:
-                self.logger.error(f"❌ Attempt {attempts} | Position imbalance: {self.backpack_position + self.lighter_position}")
+            imbalance = self.backpack_position + self.lighter_position
+            if abs(imbalance) > self.order_quantity:
+                self.logger.warning(f"⚠️ Attempt {attempts} | Position imbalance: {imbalance}")
+                # Auto-rebalance: reduce the side with the larger absolute position
+                await self.rebalance_positions(imbalance)
                 await asyncio.sleep(5)
             else:
                 position_is_balanced = True
                 break
         return position_is_balanced
+
+    async def rebalance_positions(self, imbalance: Decimal):
+        """Auto-rebalance positions between Backpack and Lighter.
+
+        imbalance = backpack_position + lighter_position
+        If imbalance > 0: net long exposure, need to sell on the exchange with larger long position
+        If imbalance < 0: net short exposure, need to buy on the exchange with larger short position
+
+        Strategy: adjust the exchange with the LARGER absolute position toward balance.
+        """
+        rebalance_qty = abs(imbalance)
+        self.logger.info(f"🔄 Auto-rebalancing: imbalance = {imbalance}, rebalance_qty = {rebalance_qty}")
+
+        try:
+            if imbalance > 0:
+                # Net long: we need to sell somewhere or buy somewhere
+                # If backpack is more long than lighter is short, sell on backpack
+                # If lighter is less short than backpack is long, sell on lighter
+                if abs(self.backpack_position) >= abs(self.lighter_position):
+                    self.logger.info(f"🔄 Selling {rebalance_qty} on Backpack to rebalance")
+                    await self.place_backpack_market_order('sell', rebalance_qty)
+                    await asyncio.sleep(2)
+                else:
+                    self.logger.info(f"🔄 Selling {rebalance_qty} on Lighter to rebalance")
+                    await self.place_lighter_market_order('sell', rebalance_qty)
+                    await asyncio.sleep(2)
+            else:
+                # Net short: we need to buy somewhere
+                if abs(self.backpack_position) >= abs(self.lighter_position):
+                    self.logger.info(f"🔄 Buying {rebalance_qty} on Backpack to rebalance")
+                    await self.place_backpack_market_order('buy', rebalance_qty)
+                    await asyncio.sleep(2)
+                else:
+                    self.logger.info(f"🔄 Buying {rebalance_qty} on Lighter to rebalance")
+                    await self.place_lighter_market_order('buy', rebalance_qty)
+                    await asyncio.sleep(2)
+
+            self.logger.info(f"✅ Rebalance order placed, waiting for confirmation...")
+        except Exception as e:
+            self.logger.error(f"❌ Error during rebalancing: {e}")
+            self.logger.error(f"❌ Full traceback: {traceback.format_exc()}")
 
     async def trading_loop(self):
         """Main trading loop implementing the v2 statistical arbitrage strategy.
@@ -1237,8 +1281,9 @@ class HedgeBot:
 
             position_is_balanced = await self.check_position_balance(log_position)
             if not position_is_balanced:
-                self.stop_flag = True
-                break
+                self.logger.warning("⚠️ Position rebalancing failed after 4 attempts, retrying next cycle...")
+                await asyncio.sleep(10)
+                continue
 
             if None in [self.lighter_best_bid, self.lighter_best_ask, self.backpack_best_bid, self.backpack_best_ask]:
                 await asyncio.sleep(1)
