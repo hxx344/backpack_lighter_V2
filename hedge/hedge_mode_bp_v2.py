@@ -163,6 +163,29 @@ class HedgeBot:
         self.bbo_write_counter = 0
         self.bbo_flush_interval = 10  # Flush every N writes
 
+        # Trading statistics tracking
+        self.session_start_time = time.time()
+        self.last_summary_time = time.time()
+        self.summary_interval = 300  # Default: print summary every 5 minutes
+
+        # Backpack trade stats
+        self.bp_trade_count = 0
+        self.bp_buy_count = 0
+        self.bp_sell_count = 0
+        self.bp_buy_volume_base = Decimal('0')   # Total base amount bought
+        self.bp_sell_volume_base = Decimal('0')  # Total base amount sold
+        self.bp_buy_cost_quote = Decimal('0')    # Total quote spent on buys (qty * price)
+        self.bp_sell_revenue_quote = Decimal('0') # Total quote received from sells (qty * price)
+
+        # Lighter trade stats
+        self.lt_trade_count = 0
+        self.lt_buy_count = 0
+        self.lt_sell_count = 0
+        self.lt_buy_volume_base = Decimal('0')
+        self.lt_sell_volume_base = Decimal('0')
+        self.lt_buy_cost_quote = Decimal('0')
+        self.lt_sell_revenue_quote = Decimal('0')
+
         # Lighter API configuration
         self.lighter_base_url = "https://mainnet.zklighter.elliot.ai"
         self.account_index = int(os.getenv('LIGHTER_ACCOUNT_INDEX'))
@@ -255,6 +278,65 @@ class HedgeBot:
             ])
             self.bbo_csv_file.flush()
 
+    def print_periodic_summary(self, force: bool = False):
+        """Print periodic trading summary with volume and P&L stats."""
+        now = time.time()
+        if not force and (now - self.last_summary_time) < self.summary_interval:
+            return
+        self.last_summary_time = now
+
+        elapsed = now - self.session_start_time
+        hours = int(elapsed // 3600)
+        minutes = int((elapsed % 3600) // 60)
+        seconds = int(elapsed % 60)
+        runtime_str = f"{hours}h {minutes}m {seconds}s"
+
+        # Calculate volumes in quote (USDT)
+        bp_total_volume = self.bp_buy_cost_quote + self.bp_sell_revenue_quote
+        lt_total_volume = self.lt_buy_cost_quote + self.lt_sell_revenue_quote
+        combined_volume = bp_total_volume + lt_total_volume
+
+        # Calculate P&L per exchange
+        # P&L = sell_revenue - buy_cost + unrealized (position * current_price)
+        bp_realized_pnl = self.bp_sell_revenue_quote - self.bp_buy_cost_quote
+        lt_realized_pnl = self.lt_sell_revenue_quote - self.lt_buy_cost_quote
+
+        # Unrealized P&L based on current positions and mid prices
+        bp_unrealized = Decimal('0')
+        lt_unrealized = Decimal('0')
+        if self.backpack_best_bid and self.backpack_best_ask:
+            bp_mid = (self.backpack_best_bid + self.backpack_best_ask) / 2
+            bp_unrealized = self.backpack_position * bp_mid
+        if self.lighter_best_bid and self.lighter_best_ask:
+            lt_mid = (self.lighter_best_bid + self.lighter_best_ask) / 2
+            lt_unrealized = self.lighter_position * lt_mid
+
+        total_realized = bp_realized_pnl + lt_realized_pnl
+        total_unrealized = bp_unrealized + lt_unrealized
+        # Estimated total P&L = realized + unrealized
+        estimated_pnl = total_realized + total_unrealized
+
+        total_trades = self.bp_trade_count + self.lt_trade_count
+
+        self.logger.info("="*60)
+        self.logger.info(f"📊 定时交易总结 | 运行时间: {runtime_str}")
+        self.logger.info("-"*60)
+        self.logger.info(f"📈 Backpack:  交易 {self.bp_trade_count} 笔 (买 {self.bp_buy_count} / 卖 {self.bp_sell_count})")
+        self.logger.info(f"   买入量: {self.bp_buy_volume_base} {self.ticker} | 卖出量: {self.bp_sell_volume_base} {self.ticker}")
+        self.logger.info(f"   买入额: {self.bp_buy_cost_quote:.2f} USDT | 卖出额: {self.bp_sell_revenue_quote:.2f} USDT")
+        self.logger.info(f"   交易额: {bp_total_volume:.2f} USDT | 已实现盈亏: {bp_realized_pnl:+.4f} USDT")
+        self.logger.info("-"*60)
+        self.logger.info(f"📈 Lighter:   交易 {self.lt_trade_count} 笔 (买 {self.lt_buy_count} / 卖 {self.lt_sell_count})")
+        self.logger.info(f"   买入量: {self.lt_buy_volume_base} {self.ticker} | 卖出量: {self.lt_sell_volume_base} {self.ticker}")
+        self.logger.info(f"   买入额: {self.lt_buy_cost_quote:.2f} USDT | 卖出额: {self.lt_sell_revenue_quote:.2f} USDT")
+        self.logger.info(f"   交易额: {lt_total_volume:.2f} USDT | 已实现盈亏: {lt_realized_pnl:+.4f} USDT")
+        self.logger.info("-"*60)
+        self.logger.info(f"💰 合计: 交易 {total_trades} 笔 | 总交易额: {combined_volume:.2f} USDT")
+        self.logger.info(f"   已实现盈亏: {total_realized:+.4f} USDT")
+        self.logger.info(f"   未实现盈亏: {total_unrealized:+.4f} USDT (BP仓位: {self.backpack_position} | LT仓位: {self.lighter_position})")
+        self.logger.info(f"   估计总盈亏: {estimated_pnl:+.4f} USDT")
+        self.logger.info("="*60)
+
     def log_trade_to_csv(self, exchange: str, side: str, price: str, quantity: str, expected_price: str):
         """Log trade details to CSV file."""
         timestamp = datetime.now(pytz.UTC).isoformat()
@@ -327,16 +409,27 @@ class HedgeBot:
     def handle_lighter_order_result(self, order_data):
         """Handle Lighter order result from WebSocket."""
         try:
-            order_data["avg_filled_price"] = (Decimal(order_data["filled_quote_amount"]) /
-                                              Decimal(order_data["filled_base_amount"]))
+            filled_base = Decimal(order_data["filled_base_amount"])
+            filled_quote = Decimal(order_data["filled_quote_amount"])
+            order_data["avg_filled_price"] = filled_quote / filled_base
             if order_data["is_ask"]:
                 order_data["side"] = "SHORT"
                 order_type = "OPEN"
-                self.lighter_position -= Decimal(order_data["filled_base_amount"])
+                self.lighter_position -= filled_base
+                # Track Lighter sell stats
+                self.lt_trade_count += 1
+                self.lt_sell_count += 1
+                self.lt_sell_volume_base += filled_base
+                self.lt_sell_revenue_quote += filled_quote
             else:
                 order_data["side"] = "LONG"
                 order_type = "CLOSE"
-                self.lighter_position += Decimal(order_data["filled_base_amount"])
+                self.lighter_position += filled_base
+                # Track Lighter buy stats
+                self.lt_trade_count += 1
+                self.lt_buy_count += 1
+                self.lt_buy_volume_base += filled_base
+                self.lt_buy_cost_quote += filled_quote
 
             client_order_index = order_data["client_order_id"]
 
@@ -833,10 +926,22 @@ class HedgeBot:
 
                 # Handle the order update
                 if status == 'FILLED' and self.backpack_order_status != 'FILLED':
+                    trade_price = Decimal(price) if price else Decimal('0')
+                    trade_value = filled_size * trade_price
                     if side == 'buy':
                         self.backpack_position += filled_size
+                        # Track Backpack buy stats
+                        self.bp_trade_count += 1
+                        self.bp_buy_count += 1
+                        self.bp_buy_volume_base += filled_size
+                        self.bp_buy_cost_quote += trade_value
                     else:
                         self.backpack_position -= filled_size
+                        # Track Backpack sell stats
+                        self.bp_trade_count += 1
+                        self.bp_sell_count += 1
+                        self.bp_sell_volume_base += filled_size
+                        self.bp_sell_revenue_quote += trade_value
                     self.logger.info(f"[{order_id}] [{order_type}] [Backpack] [{status}]: {filled_size} @ {price}")
                     self.backpack_order_status = status
                     if filled_size > Decimal('0.0001'):
@@ -1204,6 +1309,9 @@ class HedgeBot:
             else:
                 await asyncio.sleep(1)
 
+            # Periodic summary output
+            self.print_periodic_summary()
+
     async def run(self):
         """Run the hedge bot."""
         self.setup_signal_handlers()
@@ -1216,6 +1324,8 @@ class HedgeBot:
             self.logger.error(f"Error in trading loop: {e}")
             self.logger.error(f"Full traceback: {traceback.format_exc()}")
         finally:
+            # Print final summary before shutdown
+            self.print_periodic_summary(force=True)
             self.logger.info("🔄 Cleaning up...")
             try:
                 await self.async_shutdown()
@@ -1230,6 +1340,7 @@ if __name__ == "__main__":
     parser.add_argument("--max-position", type=str, default="0", help="Maximum position size (0 = no limit)")
     parser.add_argument("--fill-timeout", type=int, default=5, help="Fill timeout in seconds")
     parser.add_argument("--env-file", type=str, default=".env", help="Path to .env file (default: .env)")
+    parser.add_argument("--summary-interval", type=int, default=300, help="Periodic summary interval in seconds (default: 300)")
 
     args = parser.parse_args()
 
@@ -1245,5 +1356,6 @@ if __name__ == "__main__":
         fill_timeout=args.fill_timeout,
         max_position=max_position
     )
+    bot.summary_interval = args.summary_interval
 
     asyncio.run(bot.run())
