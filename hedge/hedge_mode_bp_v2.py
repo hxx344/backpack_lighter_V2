@@ -45,6 +45,7 @@ class HedgeBot:
         self.current_order = {}
         self.max_position = max_position
         self.spread_history = deque(maxlen=2000)
+        self.lighter_size_step = None  # Will be set from market config
 
         self.exp_backpack_price = 0
         self.exp_lighter_price = 0
@@ -779,11 +780,20 @@ class HedgeBot:
 
             for market in data["order_books"]:
                 if market["symbol"] == self.ticker:
-                    price_multiplier = pow(10, market["supported_price_decimals"])
+                    size_decimals = market["supported_size_decimals"]
+                    price_decimals = market["supported_price_decimals"]
+                    price_multiplier = pow(10, price_decimals)
+                    base_amount_multiplier = pow(10, size_decimals)
+                    tick_size = Decimal("1") / (Decimal("10") ** price_decimals)
+                    # Size step: minimum increment for base amount
+                    size_step = Decimal("1") / (Decimal("10") ** size_decimals)
+                    self.lighter_size_step = size_step
+                    self.logger.info(f"Lighter market config: size_decimals={size_decimals}, "
+                                     f"price_decimals={price_decimals}, size_step={size_step}")
                     return (market["market_id"],
-                           pow(10, market["supported_size_decimals"]),
+                           base_amount_multiplier,
                            price_multiplier,
-                           Decimal("1") / (Decimal("10") ** market["supported_price_decimals"])
+                           tick_size
                            )
             raise Exception(f"Ticker {self.ticker} not found")
 
@@ -853,12 +863,25 @@ class HedgeBot:
         self.lighter_order_size = quantity
 
         try:
+            # Round quantity to Lighter's size step to avoid precision issues
+            if hasattr(self, 'lighter_size_step') and self.lighter_size_step:
+                quantity = (quantity / self.lighter_size_step).to_integral_value() * self.lighter_size_step
+
+            base_amount = round(float(quantity * self.base_amount_multiplier))
+            price_int = round(float(price * self.price_multiplier))
+
+            if base_amount <= 0:
+                self.logger.error(f"❌ Invalid base_amount={base_amount} (quantity={quantity}, multiplier={self.base_amount_multiplier})")
+                return None
+
+            self.logger.info(f"Lighter order params: qty={quantity}, base_amount={base_amount}, price_int={price_int}")
+
             client_order_index = int(time.time() * 1000)
             tx, tx_hash, error = await self.lighter_client.create_order(
                 market_index=self.lighter_market_index,
                 client_order_index=client_order_index,
-                base_amount=int(quantity * self.base_amount_multiplier),
-                price=int(price * self.price_multiplier),
+                base_amount=base_amount,
+                price=price_int,
                 is_ask=is_ask,
                 order_type=self.lighter_client.ORDER_TYPE_LIMIT,
                 time_in_force=self.lighter_client.ORDER_TIME_IN_FORCE_GOOD_TILL_TIME,
@@ -900,7 +923,7 @@ class HedgeBot:
                 self.logger.error("❌ Cannot modify order - no order ID available")
                 return
 
-            lighter_price = int(new_price * self.price_multiplier)
+            lighter_price = round(float(new_price * self.price_multiplier))
 
             self.logger.info(f"🔧 Attempting to modify order - Market: {self.lighter_market_index}, "
                              f"Client Order Index: {client_order_index}, New Price: {lighter_price}")
@@ -908,7 +931,7 @@ class HedgeBot:
             tx_info, tx_hash, error = await self.lighter_client.modify_order(
                 market_index=self.lighter_market_index,
                 order_index=client_order_index,
-                base_amount=int(self.lighter_order_size * self.base_amount_multiplier),
+                base_amount=round(float(self.lighter_order_size * self.base_amount_multiplier)),
                 price=lighter_price,
                 trigger_price=0
             )
@@ -1181,6 +1204,12 @@ class HedgeBot:
         Strategy: adjust the exchange with the LARGER absolute position toward balance.
         """
         rebalance_qty = abs(imbalance)
+        # Round to Lighter's size step to avoid precision issues
+        if hasattr(self, 'lighter_size_step') and self.lighter_size_step:
+            rebalance_qty = (rebalance_qty / self.lighter_size_step).to_integral_value() * self.lighter_size_step
+        if rebalance_qty <= 0:
+            self.logger.warning(f"⚠️ Rebalance qty too small after rounding: {abs(imbalance)} → {rebalance_qty}")
+            return
         self.logger.info(f"🔄 Auto-rebalancing: imbalance = {imbalance}, rebalance_qty = {rebalance_qty}")
 
         try:
