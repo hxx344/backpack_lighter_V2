@@ -10,6 +10,7 @@ import argparse
 import traceback
 import csv
 import statistics
+import dotenv
 from decimal import Decimal
 from typing import Tuple
 from collections import deque
@@ -1221,8 +1222,12 @@ if __name__ == "__main__":
     parser.add_argument("--quantity", type=str, required=True, help="Order quantity per trade")
     parser.add_argument("--max-position", type=str, default="0", help="Maximum position size (0 = no limit)")
     parser.add_argument("--fill-timeout", type=int, default=5, help="Fill timeout in seconds")
+    parser.add_argument("--env-file", type=str, default=".env", help="Path to .env file (default: .env)")
 
     args = parser.parse_args()
+
+    # Load environment variables from .env file
+    dotenv.load_dotenv(args.env_file)
 
     order_quantity = Decimal(args.quantity)
     max_position = Decimal(args.max_position)
