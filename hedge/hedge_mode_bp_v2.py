@@ -1247,7 +1247,7 @@ class HedgeBot:
             # Record spread: lighter_best_bid - backpack_best_bid
             self.spread_history.append(self.lighter_best_bid - self.backpack_best_bid)
 
-            if len(self.spread_history) > 1000:
+            if len(self.spread_history) > 200:
                 data = list(self.spread_history)
                 median_val = statistics.median(data)
                 long_bp_threshold = median_val + self.backpack_best_ask * Decimal("0.0002")
@@ -1256,7 +1256,7 @@ class HedgeBot:
                 self.log_thresholds_to_json(long_bp_threshold, short_bp_threshold)
             else:
                 if log_position:
-                    self.logger.info(f"logging spread history. {len(self.spread_history)}/1000")
+                    self.logger.info(f"logging spread history. {len(self.spread_history)}/200")
                     self.logger.info(f"best bid: {self.lighter_best_bid} | best ask: {self.lighter_best_ask}")
                 await asyncio.sleep(1)
                 continue
