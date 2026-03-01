@@ -169,6 +169,12 @@ class HedgeBot:
         self.last_summary_time = time.time()
         self.summary_interval = 300  # Default: print summary every 5 minutes
 
+        # Max position threshold relaxation tracking
+        self.at_max_position_since = None  # Timestamp when position first hit max
+        self.threshold_relax_start = 1800     # Start relaxing after N seconds at max (default: 1800s)
+        self.threshold_relax_rate = Decimal('0.0000002')  # Relax threshold by this per second
+        self.threshold_relax_cap = Decimal('0.00006')    # Maximum relaxation (price * cap), conservative to preserve arb edge
+
         # Backpack trade stats
         self.bp_trade_count = 0
         self.bp_buy_count = 0
@@ -1344,8 +1350,12 @@ class HedgeBot:
                 await asyncio.sleep(1)
                 continue
 
-            # Record spread: lighter_best_bid - backpack_best_bid
-            self.spread_history.append(self.lighter_best_bid - self.backpack_best_bid)
+            # Record spread using mid prices for symmetry between long/short directions
+            # Using bid-only spread causes asymmetry: reducing position requires overcoming
+            # Lighter's wider bid-ask spread, making it structurally harder to trigger.
+            lighter_mid = (self.lighter_best_bid + self.lighter_best_ask) / 2
+            bp_mid = (self.backpack_best_bid + self.backpack_best_ask) / 2
+            self.spread_history.append(lighter_mid - bp_mid)
 
             if len(self.spread_history) > 200:
                 data = list(self.spread_history)
@@ -1363,19 +1373,79 @@ class HedgeBot:
 
             long_bp = False
             short_bp = False
+
+            # --- Max position threshold relaxation logic ---
+            # When position is at max, gradually relax the threshold for the
+            # direction that would REDUCE position, so the bot doesn't stay idle.
+            at_long_max = self.max_position > 0 and self.backpack_position >= self.max_position
+            at_short_max = self.max_position > 0 and self.backpack_position <= -1 * self.max_position
+            at_max = at_long_max or at_short_max
+
+            if at_max:
+                if self.at_max_position_since is None:
+                    self.at_max_position_since = time.time()
+                    self.logger.info(f"⏱️ Position hit max ({self.backpack_position}), starting relaxation timer")
+            else:
+                if self.at_max_position_since is not None:
+                    self.logger.info(f"✅ Position back within limits ({self.backpack_position}), resetting relaxation timer")
+                self.at_max_position_since = None
+
+            threshold_relaxation = Decimal('0')
+            if self.at_max_position_since is not None:
+                seconds_at_max = Decimal(str(time.time() - self.at_max_position_since))
+                if seconds_at_max > self.threshold_relax_start:
+                    relax_seconds = seconds_at_max - self.threshold_relax_start
+                    ref_price = self.backpack_best_ask if self.backpack_best_ask else Decimal('1')
+                    threshold_relaxation = min(
+                        relax_seconds * self.threshold_relax_rate,
+                        ref_price * self.threshold_relax_cap
+                    )
+                    if log_position:
+                        self.logger.info(
+                            f"🔓 Threshold relaxation active: {float(threshold_relaxation):.4f} "
+                            f"(at max for {float(seconds_at_max):.0f}s, "
+                            f"cap={float(ref_price * self.threshold_relax_cap):.4f})")
+
+            # Apply relaxation: only relax the direction that REDUCES position
+            effective_long_threshold = long_bp_threshold
+            effective_short_threshold = short_bp_threshold
+            if at_short_max:
+                # Need to go long (buy BP) to reduce short position
+                effective_long_threshold = long_bp_threshold - threshold_relaxation
+            if at_long_max:
+                # Need to go short (sell BP) to reduce long position
+                effective_short_threshold = short_bp_threshold - threshold_relaxation
+
+            # Determine which directions are allowed based on position limits
+            # When at max long, ONLY allow short (reduce); when at max short, ONLY allow long (reduce)
+            allow_long = not at_long_max   # Can't go more long if already at max long
+            allow_short = not at_short_max  # Can't go more short if already at max short
+
             # Long Backpack signal: lighter_bid - backpack_ask > threshold
-            # (buy on Backpack, sell on Lighter)
-            if (self.lighter_best_bid and self.backpack_best_ask and
-                    self.lighter_best_bid - self.backpack_best_ask > long_bp_threshold and
-                    self.backpack_position <= self.max_position):
+            # (buy on Backpack, sell on Lighter) → increases BP position
+            long_signal = (self.lighter_best_bid and self.backpack_best_ask and
+                    self.lighter_best_bid - self.backpack_best_ask > effective_long_threshold)
+            # Short Backpack signal: backpack_bid - lighter_ask > threshold
+            # (sell on Backpack, buy on Lighter) → decreases BP position
+            short_signal = (self.backpack_best_bid and self.lighter_best_ask and
+                    self.backpack_best_bid - self.lighter_best_ask > effective_short_threshold)
+
+            # When at max position, prioritize the REDUCING direction
+            if at_long_max and short_signal:
+                # At max long → MUST reduce first, prioritize short even if long signal also fires
+                self.exp_backpack_price = self.backpack_best_bid
+                self.exp_lighter_price = self.lighter_best_ask
+                short_bp = True
+            elif at_short_max and long_signal:
+                # At max short → MUST reduce first, prioritize long even if short signal also fires
                 self.exp_backpack_price = self.backpack_best_ask
                 self.exp_lighter_price = self.lighter_best_bid
                 long_bp = True
-            # Short Backpack signal: backpack_bid - lighter_ask > threshold
-            # (sell on Backpack, buy on Lighter)
-            elif (self.backpack_best_bid and self.lighter_best_ask and
-                    self.backpack_best_bid - self.lighter_best_ask > short_bp_threshold and
-                    self.backpack_position >= -1 * self.max_position):
+            elif long_signal and allow_long:
+                self.exp_backpack_price = self.backpack_best_ask
+                self.exp_lighter_price = self.lighter_best_bid
+                long_bp = True
+            elif short_signal and allow_short:
                 self.exp_backpack_price = self.backpack_best_bid
                 self.exp_lighter_price = self.lighter_best_ask
                 short_bp = True
@@ -1441,6 +1511,9 @@ if __name__ == "__main__":
     parser.add_argument("--fill-timeout", type=int, default=5, help="Fill timeout in seconds")
     parser.add_argument("--env-file", type=str, default=".env", help="Path to .env file (default: .env)")
     parser.add_argument("--summary-interval", type=int, default=300, help="Periodic summary interval in seconds (default: 300)")
+    parser.add_argument("--relax-start", type=int, default=60, help="Seconds at max position before threshold relaxation starts (default: 60)")
+    parser.add_argument("--relax-rate", type=str, default="0.00002", help="Threshold relaxation per second (default: 0.00002)")
+    parser.add_argument("--relax-cap", type=str, default="0.001", help="Max threshold relaxation as fraction of price (default: 0.001)")
 
     args = parser.parse_args()
 
@@ -1457,5 +1530,8 @@ if __name__ == "__main__":
         max_position=max_position
     )
     bot.summary_interval = args.summary_interval
+    bot.threshold_relax_start = args.relax_start
+    bot.threshold_relax_rate = Decimal(args.relax_rate)
+    bot.threshold_relax_cap = Decimal(args.relax_cap)
 
     asyncio.run(bot.run())
