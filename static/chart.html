@@ -8,6 +8,7 @@
 <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; overflow: hidden; }
   body { background: #1a1a2e; color: #e0e0e0; font-family: 'Segoe UI', system-ui, sans-serif; }
 
   .header {
@@ -19,14 +20,15 @@
   .header .info span { color: #a0a0c0; }
   .header .info .val { color: #4ecca3; font-weight: 600; margin-left: 4px; }
 
-  .charts-container { padding: 16px 24px; display: flex; flex-direction: column; gap: 12px; }
+  .charts-container { padding: 16px 24px; display: flex; flex-direction: column; gap: 12px; height: calc(100vh - 90px); }
 
   .chart-card {
     background: #16213e; border: 1px solid #0f3460; border-radius: 8px;
-    padding: 16px; position: relative;
+    padding: 16px; position: relative; overflow: hidden;
   }
   .chart-card h2 { font-size: 14px; color: #a0a0c0; margin-bottom: 8px; }
-  .chart-card canvas { width: 100% !important; }
+  .chart-wrap { position: relative; width: 100%; height: calc(100% - 50px); }
+  .chart-card canvas { position: absolute; top: 0; left: 0; width: 100% !important; height: 100% !important; }
 
   .status-bar {
     display: flex; justify-content: space-between; padding: 8px 24px;
@@ -56,7 +58,7 @@
 
 <div class="charts-container">
   <!-- Spread Chart -->
-  <div class="chart-card" style="flex: 1;">
+  <div class="chart-card" style="flex: 3; min-height: 0;">
     <h2>价差 & 阈值 (Spread & Thresholds)</h2>
     <div class="legend-custom">
       <div class="legend-item"><div class="legend-color" style="background:#4ecca3;"></div>价差 Spread</div>
@@ -65,13 +67,13 @@
       <div class="legend-item"><div class="legend-color" style="background:#fbbf24; height:8px; width:8px; border-radius:50%;"></div>做多BP成交</div>
       <div class="legend-item"><div class="legend-color" style="background:#a78bfa; height:8px; width:8px; border-radius:50%;"></div>做空BP成交</div>
     </div>
-    <canvas id="spreadChart" height="320"></canvas>
+    <div class="chart-wrap"><canvas id="spreadChart"></canvas></div>
   </div>
 
   <!-- Position Chart -->
-  <div class="chart-card" style="flex: 0 0 180px;">
+  <div class="chart-card" style="flex: 1; min-height: 0;">
     <h2>仓位 (Position)</h2>
-    <canvas id="posChart" height="120"></canvas>
+    <div class="chart-wrap"><canvas id="posChart"></canvas></div>
   </div>
 </div>
 
