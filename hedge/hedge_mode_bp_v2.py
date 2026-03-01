@@ -169,6 +169,9 @@ class HedgeBot:
         self.last_summary_time = time.time()
         self.summary_interval = 300  # Default: print summary every 5 minutes
 
+        # Slippage control: max allowed slippage for depth aggregation (fraction of best price)
+        self.max_slippage = Decimal('0.00005')  # default 万0.5 = 0.005%
+
         # Max position threshold relaxation tracking
         self.at_max_position_since = None  # Timestamp when position first hit max
         self.threshold_relax_start = 1800     # Start relaxing after N seconds at max (default: 1800s)
@@ -1098,6 +1101,48 @@ class HedgeBot:
             self.logger.error(f"Error handling Backpack order book update: {e}")
             self.logger.error(f"Message content: {message}")
 
+    def get_available_depth(self, side: str) -> Decimal:
+        """Calculate available quantity across N price levels within slippage limit.
+
+        For 'buy' (taker lifts asks): aggregate ask levels from best ask upward,
+        stop when cumulative qty >= order_quantity or price exceeds best_ask * (1 + max_slippage).
+
+        For 'sell' (taker hits bids): aggregate bid levels from best bid downward,
+        stop when cumulative qty >= order_quantity or price falls below best_bid * (1 - max_slippage).
+
+        Returns the total available quantity within the slippage window (capped at order_quantity).
+        """
+        if side == 'buy':
+            book = self.backpack_order_book.get('asks', {})
+            if not book:
+                return Decimal('0')
+            best_price = min(book.keys())
+            price_limit = best_price * (1 + self.max_slippage)
+            # Sort asks ascending (best first)
+            sorted_levels = sorted(book.items(), key=lambda x: x[0])
+        else:
+            book = self.backpack_order_book.get('bids', {})
+            if not book:
+                return Decimal('0')
+            best_price = max(book.keys())
+            price_limit = best_price * (1 - self.max_slippage)
+            # Sort bids descending (best first)
+            sorted_levels = sorted(book.items(), key=lambda x: x[0], reverse=True)
+
+        cumulative_qty = Decimal('0')
+        for price, size in sorted_levels:
+            if side == 'buy' and price > price_limit:
+                break
+            if side == 'sell' and price < price_limit:
+                break
+            remaining = self.order_quantity - cumulative_qty
+            cumulative_qty += min(size, remaining)
+            if cumulative_qty >= self.order_quantity:
+                cumulative_qty = self.order_quantity
+                break
+
+        return cumulative_qty
+
     async def setup_backpack_depth_websocket(self):
         """Setup separate WebSocket connection for Backpack depth updates."""
         async def handle_depth_websocket():
@@ -1544,7 +1589,17 @@ class HedgeBot:
                 short_bp = True
 
             if long_bp:
-                order_quantity = min(self.order_quantity, self.backpack_best_ask_size)
+                # Aggregate depth across N ask levels within slippage limit
+                available_depth = self.get_available_depth('buy')
+                order_quantity = min(self.order_quantity, available_depth)
+
+                # Round to Lighter's size step
+                if hasattr(self, 'lighter_size_step') and self.lighter_size_step:
+                    order_quantity = (order_quantity / self.lighter_size_step).to_integral_value() * self.lighter_size_step
+
+                if order_quantity <= 0:
+                    await asyncio.sleep(0.5)
+                    continue
 
                 try:
                     # Place both trades concurrently
@@ -1557,7 +1612,17 @@ class HedgeBot:
                     self.logger.error(f"⚠️ Full traceback: {traceback.format_exc()}")
 
             elif short_bp:
-                order_quantity = min(self.order_quantity, self.backpack_best_bid_size)
+                # Aggregate depth across N bid levels within slippage limit
+                available_depth = self.get_available_depth('sell')
+                order_quantity = min(self.order_quantity, available_depth)
+
+                # Round to Lighter's size step
+                if hasattr(self, 'lighter_size_step') and self.lighter_size_step:
+                    order_quantity = (order_quantity / self.lighter_size_step).to_integral_value() * self.lighter_size_step
+
+                if order_quantity <= 0:
+                    await asyncio.sleep(0.5)
+                    continue
 
                 try:
                     # Place both trades concurrently
@@ -1607,6 +1672,7 @@ if __name__ == "__main__":
     parser.add_argument("--relax-start", type=int, default=60, help="Seconds at max position before threshold relaxation starts (default: 60)")
     parser.add_argument("--relax-rate", type=str, default="0.00002", help="Threshold relaxation per second (default: 0.00002)")
     parser.add_argument("--relax-cap", type=str, default="0.001", help="Max threshold relaxation as fraction of price (default: 0.001)")
+    parser.add_argument("--max-slippage", type=str, default="0.00005", help="Max allowed slippage for depth aggregation as fraction of best price (default: 0.00005 = 0.005%% = 万0.5)")
 
     args = parser.parse_args()
 
@@ -1626,5 +1692,6 @@ if __name__ == "__main__":
     bot.threshold_relax_start = args.relax_start
     bot.threshold_relax_rate = Decimal(args.relax_rate)
     bot.threshold_relax_cap = Decimal(args.relax_cap)
+    bot.max_slippage = Decimal(args.max_slippage)
 
     asyncio.run(bot.run())
