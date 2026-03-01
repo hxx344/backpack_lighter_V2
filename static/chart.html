@@ -296,7 +296,15 @@ async function fetchData() {
 
     if (data.points.length > 0) {
       allPoints.push(...data.points);
-      lastTimestamp = data.points[data.points.length - 1].t;
+      // Sort by timestamp and deduplicate to prevent zigzag rendering
+      allPoints.sort((a, b) => a.t - b.t);
+      const seen = new Set();
+      allPoints = allPoints.filter(p => {
+        if (seen.has(p.t)) return false;
+        seen.add(p.t);
+        return true;
+      });
+      lastTimestamp = allPoints[allPoints.length - 1].t;
     }
     if (data.trades.length > 0) {
       allTrades.push(...data.trades);
