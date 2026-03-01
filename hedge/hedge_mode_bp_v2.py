@@ -1635,7 +1635,7 @@ class HedgeBot:
                     self.logger.error(f"⚠️ Full traceback: {traceback.format_exc()}")
 
             else:
-                await asyncio.sleep(1)
+                await asyncio.sleep(0.5)
 
             # Periodic summary output
             self.print_periodic_summary()
