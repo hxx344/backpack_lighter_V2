@@ -193,6 +193,10 @@ class HedgeBot:
         self.lt_buy_cost_quote = Decimal('0')
         self.lt_sell_revenue_quote = Decimal('0')
 
+        # Account balance tracking (updated in periodic summary)
+        self.bp_balance = None   # Backpack account total balance (USDC)
+        self.lt_balance = None   # Lighter account collateral (USDC)
+
         # Lighter API configuration
         self.lighter_base_url = "https://mainnet.zklighter.elliot.ai"
         self.account_index = int(os.getenv('LIGHTER_ACCOUNT_INDEX'))
@@ -351,6 +355,10 @@ class HedgeBot:
 
         total_trades = self.bp_trade_count + self.lt_trade_count
 
+        # Fetch account balances
+        self.bp_balance = self.get_backpack_balance()
+        self.lt_balance = self.get_lighter_balance()
+
         self.logger.info("="*60)
         self.logger.info(f"📊 定时交易总结 | 运行时间: {runtime_str}")
         self.logger.info("-"*60)
@@ -368,6 +376,13 @@ class HedgeBot:
         self.logger.info(f"   跨所对冲已实现盈亏: {combined_realized_pnl:+.4f} USDT")
         self.logger.info(f"   未实现盈亏: {total_unrealized:+.4f} USDT (BP仓位: {self.backpack_position} | LT仓位: {self.lighter_position})")
         self.logger.info(f"   估计总盈亏: {estimated_pnl:+.4f} USDT")
+        self.logger.info("-"*60)
+        bp_bal_str = f"{self.bp_balance:.2f} USDC" if self.bp_balance and self.bp_balance >= 0 else "获取失败"
+        lt_bal_str = f"{self.lt_balance:.2f} USDC" if self.lt_balance and self.lt_balance >= 0 else "获取失败"
+        total_bal_str = ""
+        if self.bp_balance and self.bp_balance >= 0 and self.lt_balance and self.lt_balance >= 0:
+            total_bal_str = f" | 合计: {self.bp_balance + self.lt_balance:.2f} USDC"
+        self.logger.info(f"💎 账户资金: BP: {bp_bal_str} | LT: {lt_bal_str}{total_bal_str}")
         self.logger.info("="*60)
 
     def log_trade_to_csv(self, exchange: str, side: str, price: str, quantity: str, expected_price: str):
@@ -1177,6 +1192,41 @@ class HedgeBot:
             sys.exit(1)
 
         return current_position
+
+    def get_backpack_balance(self) -> Decimal:
+        """Get Backpack account total balance (collateral) via REST API."""
+        try:
+            if self.backpack_client and hasattr(self.backpack_client, 'account_client'):
+                collateral_data = self.backpack_client.account_client.get_collateral()
+                if isinstance(collateral_data, list):
+                    total = Decimal('0')
+                    for item in collateral_data:
+                        total += Decimal(str(item.get('totalValue', '0')))
+                    return total
+                elif isinstance(collateral_data, dict):
+                    return Decimal(str(collateral_data.get('totalCollateral', '0')))
+        except Exception as e:
+            self.logger.warning(f"⚠️ Failed to get Backpack balance: {e}")
+        return Decimal('-1')  # Indicates failure
+
+    def get_lighter_balance(self) -> Decimal:
+        """Get Lighter account collateral via REST API."""
+        try:
+            url = f"{self.lighter_base_url}/api/v1/account"
+            headers = {"accept": "application/json"}
+            params = {"by": "index", "value": self.account_index}
+            response = requests.get(url, headers=headers, params=params, timeout=10)
+            response.raise_for_status()
+            data = response.json()
+            if 'accounts' in data and data['accounts']:
+                account = data['accounts'][0]
+                # Lighter returns collateral in the account object
+                collateral = account.get('free_collateral', '0')
+                total_collateral = account.get('total_collateral', collateral)
+                return Decimal(str(total_collateral))
+        except Exception as e:
+            self.logger.warning(f"⚠️ Failed to get Lighter balance: {e}")
+        return Decimal('-1')  # Indicates failure
 
     async def check_position_balance(self, log_position: bool = True) -> bool:
         """Check if positions on both exchanges are balanced. If not, auto-rebalance."""
