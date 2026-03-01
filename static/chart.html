@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>BP-Lighter 价差监控</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #1a1a2e; color: #e0e0e0; font-family: 'Segoe UI', system-ui, sans-serif; }
+
+  .header {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 12px 24px; background: #16213e; border-bottom: 1px solid #0f3460;
+  }
+  .header h1 { font-size: 18px; color: #e94560; }
+  .header .info { display: flex; gap: 24px; font-size: 13px; }
+  .header .info span { color: #a0a0c0; }
+  .header .info .val { color: #4ecca3; font-weight: 600; margin-left: 4px; }
+
+  .charts-container { padding: 16px 24px; display: flex; flex-direction: column; gap: 12px; }
+
+  .chart-card {
+    background: #16213e; border: 1px solid #0f3460; border-radius: 8px;
+    padding: 16px; position: relative;
+  }
+  .chart-card h2 { font-size: 14px; color: #a0a0c0; margin-bottom: 8px; }
+  .chart-card canvas { width: 100% !important; }
+
+  .status-bar {
+    display: flex; justify-content: space-between; padding: 8px 24px;
+    font-size: 12px; color: #666; background: #111;
+  }
+  .status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+  .status-dot.ok { background: #4ecca3; }
+  .status-dot.err { background: #e94560; }
+
+  .legend-custom { display: flex; gap: 18px; margin-bottom: 6px; flex-wrap: wrap; }
+  .legend-item { display: flex; align-items: center; gap: 5px; font-size: 12px; }
+  .legend-color { width: 14px; height: 3px; border-radius: 2px; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>BP-Lighter 价差监控</h1>
+  <div class="info">
+    <span>BP 仓位: <span class="val" id="bp-pos">--</span></span>
+    <span>LT 仓位: <span class="val" id="lt-pos">--</span></span>
+    <span>BP 余额: <span class="val" id="bp-bal">--</span></span>
+    <span>LT 余额: <span class="val" id="lt-bal">--</span></span>
+    <span>数据点: <span class="val" id="data-count">0</span></span>
+  </div>
+</div>
+
+<div class="charts-container">
+  <!-- Spread Chart -->
+  <div class="chart-card" style="flex: 1;">
+    <h2>价差 & 阈值 (Spread & Thresholds)</h2>
+    <div class="legend-custom">
+      <div class="legend-item"><div class="legend-color" style="background:#4ecca3;"></div>价差 Spread</div>
+      <div class="legend-item"><div class="legend-color" style="background:#e94560;"></div>做多BP阈值 Long</div>
+      <div class="legend-item"><div class="legend-color" style="background:#3b82f6;"></div>做空BP阈值 Short</div>
+      <div class="legend-item"><div class="legend-color" style="background:#fbbf24; height:8px; width:8px; border-radius:50%;"></div>做多BP成交</div>
+      <div class="legend-item"><div class="legend-color" style="background:#a78bfa; height:8px; width:8px; border-radius:50%;"></div>做空BP成交</div>
+    </div>
+    <canvas id="spreadChart" height="320"></canvas>
+  </div>
+
+  <!-- Position Chart -->
+  <div class="chart-card" style="flex: 0 0 180px;">
+    <h2>仓位 (Position)</h2>
+    <canvas id="posChart" height="120"></canvas>
+  </div>
+</div>
+
+<div class="status-bar">
+  <div><span class="status-dot" id="conn-dot"></span><span id="conn-status">连接中...</span></div>
+  <div>刷新间隔: 1s | 最多显示最近 3600 个数据点</div>
+</div>
+
+<script>
+const MAX_DISPLAY = 3600;
+let lastTimestamp = 0;
+let allPoints = [];
+let allTrades = [];
+
+// ---- Spread Chart ----
+const spreadCtx = document.getElementById('spreadChart').getContext('2d');
+const spreadChart = new Chart(spreadCtx, {
+  type: 'line',
+  data: {
+    datasets: [
+      {
+        label: '价差',
+        data: [],
+        borderColor: '#4ecca3',
+        borderWidth: 1.5,
+        pointRadius: 0,
+        tension: 0.1,
+        fill: false,
+        order: 2,
+      },
+      {
+        label: '做多BP阈值',
+        data: [],
+        borderColor: '#e94560',
+        borderWidth: 1,
+        borderDash: [6, 3],
+        pointRadius: 0,
+        tension: 0,
+        fill: false,
+        order: 3,
+      },
+      {
+        label: '做空BP阈值',
+        data: [],
+        borderColor: '#3b82f6',
+        borderWidth: 1,
+        borderDash: [6, 3],
+        pointRadius: 0,
+        tension: 0,
+        fill: false,
+        order: 3,
+      },
+      {
+        label: '做多BP成交',
+        data: [],
+        borderColor: '#fbbf24',
+        backgroundColor: '#fbbf24',
+        pointRadius: 5,
+        pointStyle: 'triangle',
+        showLine: false,
+        order: 1,
+      },
+      {
+        label: '做空BP成交',
+        data: [],
+        borderColor: '#a78bfa',
+        backgroundColor: '#a78bfa',
+        pointRadius: 5,
+        pointStyle: 'rectRot',
+        showLine: false,
+        order: 1,
+      }
+    ]
+  },
+  options: {
+    responsive: true,
+    maintainAspectRatio: false,
+    animation: false,
+    interaction: { mode: 'index', intersect: false },
+    plugins: {
+      legend: { display: false },
+      tooltip: {
+        callbacks: {
+          label: function(ctx) {
+            return ctx.dataset.label + ': ' + ctx.parsed.y.toFixed(6);
+          }
+        }
+      }
+    },
+    scales: {
+      x: {
+        type: 'time',
+        time: { tooltipFormat: 'HH:mm:ss', displayFormats: { second: 'HH:mm:ss', minute: 'HH:mm' } },
+        ticks: { color: '#666', maxTicksLimit: 12 },
+        grid: { color: '#222244' }
+      },
+      y: {
+        ticks: { color: '#888', callback: v => v.toFixed(4) },
+        grid: { color: '#222244' }
+      }
+    }
+  }
+});
+
+// ---- Position Chart ----
+const posCtx = document.getElementById('posChart').getContext('2d');
+const posChart = new Chart(posCtx, {
+  type: 'line',
+  data: {
+    datasets: [
+      {
+        label: 'BP 仓位',
+        data: [],
+        borderColor: '#f97316',
+        borderWidth: 1.5,
+        pointRadius: 0,
+        tension: 0.1,
+        fill: false,
+      },
+      {
+        label: 'LT 仓位',
+        data: [],
+        borderColor: '#06b6d4',
+        borderWidth: 1.5,
+        pointRadius: 0,
+        tension: 0.1,
+        fill: false,
+      }
+    ]
+  },
+  options: {
+    responsive: true,
+    maintainAspectRatio: false,
+    animation: false,
+    interaction: { mode: 'index', intersect: false },
+    plugins: {
+      legend: { display: true, position: 'top', labels: { color: '#aaa', boxWidth: 14, font: { size: 11 } } }
+    },
+    scales: {
+      x: {
+        type: 'time',
+        time: { tooltipFormat: 'HH:mm:ss', displayFormats: { second: 'HH:mm:ss', minute: 'HH:mm' } },
+        ticks: { color: '#666', maxTicksLimit: 12 },
+        grid: { color: '#222244' }
+      },
+      y: {
+        ticks: { color: '#888' },
+        grid: { color: '#222244' }
+      }
+    }
+  }
+});
+
+function updateCharts() {
+  // Trim to MAX_DISPLAY
+  if (allPoints.length > MAX_DISPLAY) {
+    allPoints = allPoints.slice(-MAX_DISPLAY);
+  }
+
+  const spreadData = allPoints.map(p => ({ x: p.t, y: p.spread }));
+  const longThData = allPoints.map(p => ({ x: p.t, y: p.long_th }));
+  const shortThData = allPoints.map(p => ({ x: p.t, y: p.short_th }));
+
+  // Map trades to spread value (find nearest point)
+  const longTrades = allTrades.filter(t => t.side === 'long_bp').map(t => {
+    const nearest = allPoints.reduce((best, p) => Math.abs(p.t - t.t) < Math.abs(best.t - t.t) ? p : best, allPoints[0]);
+    return { x: t.t, y: nearest ? nearest.spread : 0 };
+  });
+  const shortTrades = allTrades.filter(t => t.side === 'short_bp').map(t => {
+    const nearest = allPoints.reduce((best, p) => Math.abs(p.t - t.t) < Math.abs(best.t - t.t) ? p : best, allPoints[0]);
+    return { x: t.t, y: nearest ? nearest.spread : 0 };
+  });
+
+  spreadChart.data.datasets[0].data = spreadData;
+  spreadChart.data.datasets[1].data = longThData;
+  spreadChart.data.datasets[2].data = shortThData;
+  spreadChart.data.datasets[3].data = longTrades;
+  spreadChart.data.datasets[4].data = shortTrades;
+  spreadChart.update('none');
+
+  // Position chart
+  const bpPosData = allPoints.map(p => ({ x: p.t, y: p.bp_pos }));
+  const ltPosData = allPoints.map(p => ({ x: p.t, y: p.lt_pos }));
+  posChart.data.datasets[0].data = bpPosData;
+  posChart.data.datasets[1].data = ltPosData;
+  posChart.update('none');
+}
+
+async function fetchData() {
+  try {
+    const resp = await fetch('/api/chart-data?since=' + lastTimestamp);
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    const data = await resp.json();
+
+    if (data.points.length > 0) {
+      allPoints.push(...data.points);
+      lastTimestamp = data.points[data.points.length - 1].t;
+    }
+    if (data.trades.length > 0) {
+      allTrades.push(...data.trades);
+      // Keep trades trimmed
+      if (allTrades.length > 200) allTrades = allTrades.slice(-200);
+    }
+
+    document.getElementById('bp-pos').textContent = data.bp_position?.toFixed(4) ?? '--';
+    document.getElementById('lt-pos').textContent = data.lt_position?.toFixed(4) ?? '--';
+    document.getElementById('bp-bal').textContent = data.bp_balance != null ? data.bp_balance.toFixed(2) + ' USDC' : '--';
+    document.getElementById('lt-bal').textContent = data.lt_balance != null ? data.lt_balance.toFixed(2) + ' USDC' : '--';
+    document.getElementById('data-count').textContent = allPoints.length;
+
+    document.getElementById('conn-dot').className = 'status-dot ok';
+    document.getElementById('conn-status').textContent = '已连接';
+
+    updateCharts();
+  } catch (err) {
+    document.getElementById('conn-dot').className = 'status-dot err';
+    document.getElementById('conn-status').textContent = '连接失败: ' + err.message;
+  }
+}
+
+// Poll every second
+setInterval(fetchData, 1000);
+fetchData();
+</script>
+</body>
+</html>

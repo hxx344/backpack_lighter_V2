@@ -14,6 +14,7 @@ import dotenv
 from decimal import Decimal
 from typing import Tuple
 from collections import deque
+from aiohttp import web
 
 from lighter.signer_client import SignerClient
 import sys
@@ -199,6 +200,11 @@ class HedgeBot:
         # Account balance tracking (updated in periodic summary)
         self.bp_balance = None   # Backpack account total balance (USDC)
         self.lt_balance = None   # Lighter account collateral (USDC)
+
+        # Chart data for frontend visualization
+        self.chart_data = deque(maxlen=7200)  # ~1 hour at 0.5s interval
+        self.trade_events = deque(maxlen=200)  # Recent trade markers
+        self.web_port = 8080  # Default web server port
 
         # Lighter API configuration
         self.lighter_base_url = "https://mainnet.zklighter.elliot.ai"
@@ -1554,6 +1560,17 @@ class HedgeBot:
                 # Need to go short (sell BP) to reduce long position
                 effective_short_threshold = short_bp_threshold - threshold_relaxation
 
+            # Record chart data point for frontend visualization
+            current_spread = lighter_mid - bp_mid
+            self.chart_data.append({
+                "t": int(time.time() * 1000),  # milliseconds timestamp
+                "spread": float(current_spread),
+                "long_th": float(effective_long_threshold),
+                "short_th": float(-effective_short_threshold),  # negate for chart: short threshold is compared as spread > -threshold
+                "bp_pos": float(self.backpack_position),
+                "lt_pos": float(self.lighter_position),
+            })
+
             # Determine which directions are allowed based on position limits
             # When at max long, ONLY allow short (reduce); when at max short, ONLY allow long (reduce)
             allow_long = not at_long_max   # Can't go more long if already at max long
@@ -1607,6 +1624,7 @@ class HedgeBot:
                         self.place_backpack_market_order('buy', order_quantity),
                         self.place_lighter_market_order('sell', order_quantity)
                     )
+                    self.trade_events.append({"t": int(time.time() * 1000), "side": "long_bp", "qty": float(order_quantity)})
                 except Exception as e:
                     self.logger.error(f"⚠️ Error in trading loop: {e}")
                     self.logger.error(f"⚠️ Full traceback: {traceback.format_exc()}")
@@ -1630,6 +1648,7 @@ class HedgeBot:
                         self.place_backpack_market_order('sell', order_quantity),
                         self.place_lighter_market_order('buy', order_quantity)
                     )
+                    self.trade_events.append({"t": int(time.time() * 1000), "side": "short_bp", "qty": float(order_quantity)})
                 except Exception as e:
                     self.logger.error(f"⚠️ Error in trading loop: {e}")
                     self.logger.error(f"⚠️ Full traceback: {traceback.format_exc()}")
@@ -1640,9 +1659,58 @@ class HedgeBot:
             # Periodic summary output
             self.print_periodic_summary()
 
+    # ==================== Web Dashboard ====================
+
+    async def web_handle_index(self, request):
+        """Serve the chart HTML page."""
+        html_path = os.path.join(os.path.dirname(__file__), '..', 'static', 'chart.html')
+        try:
+            with open(html_path, 'r', encoding='utf-8') as f:
+                return web.Response(text=f.read(), content_type='text/html')
+        except FileNotFoundError:
+            return web.Response(text='chart.html not found', status=404)
+
+    async def web_handle_chart_data(self, request):
+        """Return chart data as JSON."""
+        since = request.query.get('since', '0')
+        try:
+            since_ts = int(since)
+        except ValueError:
+            since_ts = 0
+
+        data = [p for p in self.chart_data if p['t'] > since_ts]
+        trades = [e for e in self.trade_events if e['t'] > since_ts]
+
+        return web.json_response({
+            "points": data,
+            "trades": trades,
+            "bp_position": float(self.backpack_position),
+            "lt_position": float(self.lighter_position),
+            "bp_balance": float(self.bp_balance) if self.bp_balance else None,
+            "lt_balance": float(self.lt_balance) if self.lt_balance else None,
+        })
+
+    async def start_web_server(self):
+        """Start the aiohttp web server for the chart dashboard."""
+        app = web.Application()
+        app.router.add_get('/', self.web_handle_index)
+        app.router.add_get('/api/chart-data', self.web_handle_chart_data)
+
+        runner = web.AppRunner(app, access_log=None)
+        await runner.setup()
+        site = web.TCPSite(runner, '0.0.0.0', self.web_port)
+        await site.start()
+        self.logger.info(f"📊 Chart dashboard started at http://localhost:{self.web_port}")
+
     async def run(self):
         """Run the hedge bot."""
         self.setup_signal_handlers()
+
+        # Start web dashboard
+        try:
+            await self.start_web_server()
+        except Exception as e:
+            self.logger.warning(f"⚠️ Failed to start web dashboard: {e}")
 
         try:
             await self.trading_loop()
@@ -1673,6 +1741,7 @@ if __name__ == "__main__":
     parser.add_argument("--relax-rate", type=str, default="0.00002", help="Threshold relaxation per second (default: 0.00002)")
     parser.add_argument("--relax-cap", type=str, default="0.001", help="Max threshold relaxation as fraction of price (default: 0.001)")
     parser.add_argument("--max-slippage", type=str, default="0.00005", help="Max allowed slippage for depth aggregation as fraction of best price (default: 0.00005 = 0.005%% = 万0.5)")
+    parser.add_argument("--web-port", type=int, default=8080, help="Web dashboard port (default: 8080)")
 
     args = parser.parse_args()
 
@@ -1693,5 +1762,6 @@ if __name__ == "__main__":
     bot.threshold_relax_rate = Decimal(args.relax_rate)
     bot.threshold_relax_cap = Decimal(args.relax_cap)
     bot.max_slippage = Decimal(args.max_slippage)
+    bot.web_port = args.web_port
 
     asyncio.run(bot.run())
