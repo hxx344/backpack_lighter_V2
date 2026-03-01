@@ -1565,6 +1565,8 @@ class HedgeBot:
             self.chart_data.append({
                 "t": int(time.time() * 1000),  # milliseconds timestamp
                 "spread": float(current_spread),
+                "long_sig": float(self.lighter_best_bid - self.backpack_best_ask),    # actual long signal: crosses above red line = trigger
+                "short_sig": float(self.lighter_best_ask - self.backpack_best_bid),   # actual short signal: crosses below blue line = trigger
                 "long_th": float(effective_long_threshold),
                 "short_th": float(-effective_short_threshold),  # negate for chart: short threshold is compared as spread > -threshold
                 "bp_pos": float(self.backpack_position),

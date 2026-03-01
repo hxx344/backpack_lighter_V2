@@ -61,9 +61,11 @@
   <div class="chart-card" style="flex: 3; min-height: 0;">
     <h2>价差 & 阈值 (Spread & Thresholds)</h2>
     <div class="legend-custom">
-      <div class="legend-item"><div class="legend-color" style="background:#4ecca3;"></div>价差 Spread</div>
-      <div class="legend-item"><div class="legend-color" style="background:#e94560;"></div>做多BP阈值 Long</div>
-      <div class="legend-item"><div class="legend-color" style="background:#3b82f6;"></div>做空BP阈值 Short</div>
+      <div class="legend-item"><div class="legend-color" style="background:#4ecca3;"></div>中间价价差</div>
+      <div class="legend-item"><div class="legend-color" style="background:#34d399; opacity:0.5;"></div>做多信号价差 (lt_bid-bp_ask)</div>
+      <div class="legend-item"><div class="legend-color" style="background:#22d3ee; opacity:0.5;"></div>做空信号价差 (lt_ask-bp_bid)</div>
+      <div class="legend-item"><div class="legend-color" style="background:#e94560;"></div>做多BP阈值</div>
+      <div class="legend-item"><div class="legend-color" style="background:#3b82f6;"></div>做空BP阈值</div>
       <div class="legend-item"><div class="legend-color" style="background:#fbbf24; height:8px; width:8px; border-radius:50%;"></div>做多BP成交</div>
       <div class="legend-item"><div class="legend-color" style="background:#a78bfa; height:8px; width:8px; border-radius:50%;"></div>做空BP成交</div>
     </div>
@@ -95,14 +97,34 @@ const spreadChart = new Chart(spreadCtx, {
   data: {
     datasets: [
       {
-        label: '价差',
+        label: '中间价价差',
         data: [],
         borderColor: '#4ecca3',
         borderWidth: 1.5,
         pointRadius: 0,
         tension: 0.1,
         fill: false,
-        order: 2,
+        order: 3,
+      },
+      {
+        label: '做多信号价差',
+        data: [],
+        borderColor: 'rgba(52, 211, 153, 0.45)',
+        borderWidth: 1,
+        pointRadius: 0,
+        tension: 0.1,
+        fill: false,
+        order: 4,
+      },
+      {
+        label: '做空信号价差',
+        data: [],
+        borderColor: 'rgba(34, 211, 238, 0.45)',
+        borderWidth: 1,
+        pointRadius: 0,
+        tension: 0.1,
+        fill: false,
+        order: 4,
       },
       {
         label: '做多BP阈值',
@@ -113,7 +135,7 @@ const spreadChart = new Chart(spreadCtx, {
         pointRadius: 0,
         tension: 0,
         fill: false,
-        order: 3,
+        order: 5,
       },
       {
         label: '做空BP阈值',
@@ -124,7 +146,7 @@ const spreadChart = new Chart(spreadCtx, {
         pointRadius: 0,
         tension: 0,
         fill: false,
-        order: 3,
+        order: 5,
       },
       {
         label: '做多BP成交',
@@ -234,24 +256,28 @@ function updateCharts() {
   }
 
   const spreadData = allPoints.map(p => ({ x: p.t, y: p.spread }));
+  const longSigData = allPoints.map(p => ({ x: p.t, y: p.long_sig }));
+  const shortSigData = allPoints.map(p => ({ x: p.t, y: p.short_sig }));
   const longThData = allPoints.map(p => ({ x: p.t, y: p.long_th }));
   const shortThData = allPoints.map(p => ({ x: p.t, y: p.short_th }));
 
   // Map trades to spread value (find nearest point)
   const longTrades = allTrades.filter(t => t.side === 'long_bp').map(t => {
     const nearest = allPoints.reduce((best, p) => Math.abs(p.t - t.t) < Math.abs(best.t - t.t) ? p : best, allPoints[0]);
-    return { x: t.t, y: nearest ? nearest.spread : 0 };
+    return { x: t.t, y: nearest ? nearest.long_sig : 0 };
   });
   const shortTrades = allTrades.filter(t => t.side === 'short_bp').map(t => {
     const nearest = allPoints.reduce((best, p) => Math.abs(p.t - t.t) < Math.abs(best.t - t.t) ? p : best, allPoints[0]);
-    return { x: t.t, y: nearest ? nearest.spread : 0 };
+    return { x: t.t, y: nearest ? nearest.short_sig : 0 };
   });
 
   spreadChart.data.datasets[0].data = spreadData;
-  spreadChart.data.datasets[1].data = longThData;
-  spreadChart.data.datasets[2].data = shortThData;
-  spreadChart.data.datasets[3].data = longTrades;
-  spreadChart.data.datasets[4].data = shortTrades;
+  spreadChart.data.datasets[1].data = longSigData;
+  spreadChart.data.datasets[2].data = shortSigData;
+  spreadChart.data.datasets[3].data = longThData;
+  spreadChart.data.datasets[4].data = shortThData;
+  spreadChart.data.datasets[5].data = longTrades;
+  spreadChart.data.datasets[6].data = shortTrades;
   spreadChart.update('none');
 
   // Position chart
