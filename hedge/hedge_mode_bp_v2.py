@@ -46,9 +46,6 @@ class HedgeBot:
         self.current_order = {}
         self.max_position = max_position
         self.spread_history = deque(maxlen=2000)
-        self.warmup_done = False  # Whether 200-point warm-up is complete
-        self.baseline_long_threshold = None   # Minimum threshold from warm-up
-        self.baseline_short_threshold = None  # Minimum threshold from warm-up
         self.lighter_size_step = None  # Will be set from market config
 
         self.exp_backpack_price = 0
@@ -1509,21 +1506,6 @@ class HedgeBot:
                 median_val = statistics.median(data)
                 long_bp_threshold = median_val + self.backpack_best_ask * Decimal("0.0002")
                 short_bp_threshold = -(median_val - self.backpack_best_ask * Decimal("0.0002"))
-
-                # On first reaching 200 points, lock in the baseline (warm-up minimum)
-                if not self.warmup_done:
-                    self.warmup_done = True
-                    self.baseline_long_threshold = long_bp_threshold
-                    self.baseline_short_threshold = short_bp_threshold
-                    self.logger.info(
-                        f"🔥 Warm-up complete ({len(data)} points). "
-                        f"Baseline thresholds: long={float(self.baseline_long_threshold):.6f}, "
-                        f"short={float(self.baseline_short_threshold):.6f}")
-
-                # Enforce baseline as floor: threshold can only grow, never shrink below warm-up
-                long_bp_threshold = max(long_bp_threshold, self.baseline_long_threshold)
-                short_bp_threshold = max(short_bp_threshold, self.baseline_short_threshold)
-
                 # Log thresholds to JSON file
                 self.log_thresholds_to_json(long_bp_threshold, short_bp_threshold)
             else:
