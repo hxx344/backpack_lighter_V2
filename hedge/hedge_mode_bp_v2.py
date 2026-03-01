@@ -1194,23 +1194,49 @@ class HedgeBot:
         return current_position
 
     def get_backpack_balance(self) -> Decimal:
-        """Get Backpack account total balance (collateral) via REST API."""
+        """Get Backpack account net equity via GET /api/v1/capital/collateral.
+
+        Response format (from API docs):
+        {
+            "assetsValue": "...",
+            "borrowLiability": "...",
+            "collateral": [...],
+            "netEquity": "...",
+            "netEquityAvailable": "...",
+            "pnlUnrealized": "...",
+            ...
+        }
+        """
         try:
             if self.backpack_client and hasattr(self.backpack_client, 'account_client'):
                 collateral_data = self.backpack_client.account_client.get_collateral()
-                if isinstance(collateral_data, list):
-                    total = Decimal('0')
-                    for item in collateral_data:
-                        total += Decimal(str(item.get('totalValue', '0')))
-                    return total
-                elif isinstance(collateral_data, dict):
-                    return Decimal(str(collateral_data.get('totalCollateral', '0')))
+                if isinstance(collateral_data, dict):
+                    # netEquity = total account value (assets - liabilities)
+                    net_equity = collateral_data.get('netEquity')
+                    if net_equity is not None:
+                        return Decimal(str(net_equity))
+                    # fallback: assetsValue
+                    assets_value = collateral_data.get('assetsValue')
+                    if assets_value is not None:
+                        return Decimal(str(assets_value))
+                self.logger.warning(f"⚠️ Unexpected BP collateral response type: {type(collateral_data)}, data: {str(collateral_data)[:200]}")
         except Exception as e:
             self.logger.warning(f"⚠️ Failed to get Backpack balance: {e}")
         return Decimal('-1')  # Indicates failure
 
     def get_lighter_balance(self) -> Decimal:
-        """Get Lighter account collateral via REST API."""
+        """Get Lighter account collateral via GET /api/v1/account.
+
+        Response format (from API docs):
+        {
+            "code": 200,
+            "accounts": [{
+                "available_balance": "...",
+                "collateral": "...",
+                ...
+            }]
+        }
+        """
         try:
             url = f"{self.lighter_base_url}/api/v1/account"
             headers = {"accept": "application/json"}
@@ -1220,10 +1246,15 @@ class HedgeBot:
             data = response.json()
             if 'accounts' in data and data['accounts']:
                 account = data['accounts'][0]
-                # Lighter returns collateral in the account object
-                collateral = account.get('free_collateral', '0')
-                total_collateral = account.get('total_collateral', collateral)
-                return Decimal(str(total_collateral))
+                # collateral = total account collateral value
+                collateral = account.get('collateral')
+                if collateral is not None:
+                    return Decimal(str(collateral))
+                # fallback: available_balance
+                available = account.get('available_balance')
+                if available is not None:
+                    return Decimal(str(available))
+                self.logger.warning(f"⚠️ Unexpected LT account fields: {list(account.keys())[:10]}")
         except Exception as e:
             self.logger.warning(f"⚠️ Failed to get Lighter balance: {e}")
         return Decimal('-1')  # Indicates failure
