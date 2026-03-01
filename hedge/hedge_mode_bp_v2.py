@@ -1225,17 +1225,23 @@ class HedgeBot:
         return Decimal('-1')  # Indicates failure
 
     def get_lighter_balance(self) -> Decimal:
-        """Get Lighter account collateral via GET /api/v1/account.
+        """Get Lighter account equity (collateral + unrealized PnL) via GET /api/v1/account.
 
-        Response format (from API docs):
+        Response format:
         {
             "code": 200,
             "accounts": [{
                 "available_balance": "...",
-                "collateral": "...",
+                "collateral": "...",          // deposited margin only, does NOT include unrealized PnL
+                "positions": [{
+                    "unrealized_pnl": "...",   // per-position unrealized PnL
+                    ...
+                }],
                 ...
             }]
         }
+
+        Account equity = collateral + sum(unrealized_pnl of all positions)
         """
         try:
             url = f"{self.lighter_base_url}/api/v1/account"
@@ -1246,15 +1252,21 @@ class HedgeBot:
             data = response.json()
             if 'accounts' in data and data['accounts']:
                 account = data['accounts'][0]
-                # collateral = total account collateral value
-                collateral = account.get('collateral')
-                if collateral is not None:
-                    return Decimal(str(collateral))
-                # fallback: available_balance
-                available = account.get('available_balance')
-                if available is not None:
-                    return Decimal(str(available))
-                self.logger.warning(f"⚠️ Unexpected LT account fields: {list(account.keys())[:10]}")
+                # collateral = deposited margin (does NOT include unrealized PnL)
+                collateral_str = account.get('collateral')
+                if collateral_str is None:
+                    collateral_str = account.get('available_balance', '0')
+                collateral = Decimal(str(collateral_str))
+
+                # Add unrealized PnL from all positions to get true account equity
+                total_unrealized_pnl = Decimal('0')
+                positions = account.get('positions', [])
+                for pos in positions:
+                    pnl = pos.get('unrealized_pnl', '0')
+                    total_unrealized_pnl += Decimal(str(pnl))
+
+                equity = collateral + total_unrealized_pnl
+                return equity
         except Exception as e:
             self.logger.warning(f"⚠️ Failed to get Lighter balance: {e}")
         return Decimal('-1')  # Indicates failure
