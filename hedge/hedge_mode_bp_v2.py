@@ -91,7 +91,7 @@ class HedgeBot:
 
         # Create different formatters for file and console
         file_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-        console_formatter = logging.Formatter('%(levelname)s:%(name)s:%(message)s')
+        console_formatter = logging.Formatter('%(asctime)s %(levelname)s:%(name)s:%(message)s', datefmt='%Y-%m-%d %H:%M:%S')
 
         file_handler.setFormatter(file_formatter)
         console_handler.setFormatter(console_formatter)
