@@ -508,6 +508,7 @@ class HedgeBot:
             self.lighter_snapshot_loaded = False
             self.lighter_best_bid = None
             self.lighter_best_ask = None
+            self.logger.info("🔄 Lighter order book reset")
 
     def update_lighter_order_book(self, side: str, levels: list):
         """Update Lighter order book with new levels."""
@@ -1154,6 +1155,13 @@ class HedgeBot:
 
             while not self.stop_flag:
                 try:
+                    # Reset Backpack order book state on (re)connect to avoid stale prices
+                    self.backpack_order_book = {"bids": {}, "asks": {}}
+                    self.backpack_best_bid = None
+                    self.backpack_best_ask = None
+                    self.backpack_order_book_ready = False
+                    self.logger.info("🔄 Backpack order book reset")
+
                     async with websockets.connect(url) as ws:
                         # Subscribe to depth updates
                         subscribe_message = {
