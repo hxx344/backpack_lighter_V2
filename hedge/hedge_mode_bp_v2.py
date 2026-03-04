@@ -201,6 +201,10 @@ class HedgeBot:
         self.bp_balance = None   # Backpack account total balance (USDC)
         self.lt_balance = None   # Lighter account collateral (USDC)
 
+        # Baseline realized PnL: recorded at startup to compute session-only realized PnL
+        self.initial_bp_realized_pnl = None  # Will be set after client init
+        self.initial_lt_realized_pnl = None  # Will be set after client init
+
         # Trade cooldown: prevent rapid oscillation after each trade pair
         self.last_trade_time = 0.0       # timestamp of last executed trade pair
         self.trade_cooldown = 2.0        # seconds to wait after a trade before re-evaluating signals
@@ -329,12 +333,32 @@ class HedgeBot:
         lt_pos_info = self.get_lighter_position_details()
 
         bp_entry_price = bp_pos_info.get('entry_price', Decimal('0'))
-        bp_realized_pnl = bp_pos_info.get('realized_pnl', Decimal('0'))
-        bp_unrealized = bp_pos_info.get('unrealized_pnl', Decimal('0'))
+        # Session-only realized PnL = current cumulative - baseline
+        bp_realized_pnl_raw = bp_pos_info.get('realized_pnl', Decimal('0'))
+        bp_realized_pnl = bp_realized_pnl_raw - (self.initial_bp_realized_pnl if self.initial_bp_realized_pnl is not None else Decimal('0'))
 
         lt_entry_price = lt_pos_info.get('entry_price', Decimal('0'))
-        lt_realized_pnl = lt_pos_info.get('realized_pnl', Decimal('0'))
-        lt_unrealized = lt_pos_info.get('unrealized_pnl', Decimal('0'))
+        lt_realized_pnl_raw = lt_pos_info.get('realized_pnl', Decimal('0'))
+        lt_realized_pnl = lt_realized_pnl_raw - (self.initial_lt_realized_pnl if self.initial_lt_realized_pnl is not None else Decimal('0'))
+
+        # Calculate unrealized PnL ourselves using a common mid price
+        # This avoids inconsistencies from different mark prices on each exchange
+        bp_unrealized = Decimal('0')
+        lt_unrealized = Decimal('0')
+        mid_price = None
+        if self.backpack_best_bid and self.backpack_best_ask and self.lighter_best_bid and self.lighter_best_ask:
+            bp_mid = (self.backpack_best_bid + self.backpack_best_ask) / 2
+            lt_mid = (self.lighter_best_bid + self.lighter_best_ask) / 2
+            mid_price = (bp_mid + lt_mid) / 2
+        elif self.backpack_best_bid and self.backpack_best_ask:
+            mid_price = (self.backpack_best_bid + self.backpack_best_ask) / 2
+        elif self.lighter_best_bid and self.lighter_best_ask:
+            mid_price = (self.lighter_best_bid + self.lighter_best_ask) / 2
+
+        if mid_price and bp_entry_price > 0 and self.backpack_position != 0:
+            bp_unrealized = (mid_price - bp_entry_price) * self.backpack_position
+        if mid_price and lt_entry_price > 0 and self.lighter_position != 0:
+            lt_unrealized = (mid_price - lt_entry_price) * self.lighter_position
 
         combined_realized_pnl = bp_realized_pnl + lt_realized_pnl
         total_unrealized = bp_unrealized + lt_unrealized
@@ -1546,6 +1570,18 @@ class HedgeBot:
             return
 
         await asyncio.sleep(5)
+
+        # Record baseline realized PnL from exchange APIs so we only show session-delta
+        try:
+            bp_init = self.get_backpack_position_details()
+            self.initial_bp_realized_pnl = bp_init.get('realized_pnl', Decimal('0'))
+            lt_init = self.get_lighter_position_details()
+            self.initial_lt_realized_pnl = lt_init.get('realized_pnl', Decimal('0'))
+            self.logger.info(f"📌 Baseline realized PnL recorded - BP: {self.initial_bp_realized_pnl:+.4f} | LT: {self.initial_lt_realized_pnl:+.4f}")
+        except Exception as e:
+            self.logger.warning(f"⚠️ Failed to record baseline realized PnL: {e}")
+            self.initial_bp_realized_pnl = Decimal('0')
+            self.initial_lt_realized_pnl = Decimal('0')
 
         last_position_log = time.time()
         while not self.stop_flag:
