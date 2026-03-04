@@ -6,8 +6,6 @@
 <title>BP-Lighter 价差监控</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
 <script>if(typeof Chart==='undefined'){document.write('<script src="https://unpkg.com/chart.js@4.4.7/dist/chart.umd.min.js"><\/script>')}</script>
-<script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
-<script>if(typeof Chart!=='undefined'&&!Chart._adapters?.date){document.write('<script src="https://unpkg.com/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"><\/script>')}</script>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   html, body { height: 100%; overflow: hidden; }
@@ -92,6 +90,17 @@ let lastTimestamp = 0;
 let allPoints = [];
 let allTrades = [];
 let chartsReady = false;
+
+function fmtTime(ms) {
+  const d = new Date(ms);
+  return String(d.getHours()).padStart(2,'0') + ':' + String(d.getMinutes()).padStart(2,'0') + ':' + String(d.getSeconds()).padStart(2,'0');
+}
+
+const timeAxisConfig = {
+  type: 'linear',
+  ticks: { color: '#666', maxTicksLimit: 12, callback: v => fmtTime(v) },
+  grid: { color: '#222244' }
+};
 
 let spreadChart, posChart;
 try {
@@ -184,6 +193,7 @@ spreadChart = new Chart(spreadCtx, {
       legend: { display: false },
       tooltip: {
         callbacks: {
+          title: function(items) { return items.length ? fmtTime(items[0].parsed.x) : ''; },
           label: function(ctx) {
             return ctx.dataset.label + ': ' + ctx.parsed.y.toFixed(6);
           }
@@ -191,12 +201,7 @@ spreadChart = new Chart(spreadCtx, {
       }
     },
     scales: {
-      x: {
-        type: 'time',
-        time: { tooltipFormat: 'HH:mm:ss', displayFormats: { second: 'HH:mm:ss', minute: 'HH:mm' } },
-        ticks: { color: '#666', maxTicksLimit: 12 },
-        grid: { color: '#222244' }
-      },
+      x: timeAxisConfig,
       y: {
         ticks: { color: '#888', callback: v => v.toFixed(4) },
         grid: { color: '#222244' }
@@ -237,15 +242,15 @@ posChart = new Chart(posCtx, {
     animation: false,
     interaction: { mode: 'index', intersect: false },
     plugins: {
-      legend: { display: true, position: 'top', labels: { color: '#aaa', boxWidth: 14, font: { size: 11 } } }
+      legend: { display: true, position: 'top', labels: { color: '#aaa', boxWidth: 14, font: { size: 11 } } },
+      tooltip: {
+        callbacks: {
+          title: function(items) { return items.length ? fmtTime(items[0].parsed.x) : ''; }
+        }
+      }
     },
     scales: {
-      x: {
-        type: 'time',
-        time: { tooltipFormat: 'HH:mm:ss', displayFormats: { second: 'HH:mm:ss', minute: 'HH:mm' } },
-        ticks: { color: '#666', maxTicksLimit: 12 },
-        grid: { color: '#222244' }
-      },
+      x: timeAxisConfig,
       y: {
         ticks: { color: '#888' },
         grid: { color: '#222244' }
@@ -262,6 +267,7 @@ chartsReady = true;
 
 function updateCharts() {
   if (!chartsReady) return;
+  try {
   // Trim to MAX_DISPLAY
   if (allPoints.length > MAX_DISPLAY) {
     allPoints = allPoints.slice(-MAX_DISPLAY);
@@ -298,6 +304,9 @@ function updateCharts() {
   posChart.data.datasets[0].data = bpPosData;
   posChart.data.datasets[1].data = ltPosData;
   posChart.update('none');
+  } catch(e) {
+    console.error('Chart update error:', e);
+  }
 }
 
 async function fetchData() {
