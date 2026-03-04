@@ -1814,6 +1814,7 @@ if __name__ == "__main__":
     parser.add_argument("--relax-rate", type=str, default="0.00002", help="Threshold relaxation per second (default: 0.00002)")
     parser.add_argument("--relax-cap", type=str, default="0.001", help="Max threshold relaxation as fraction of price (default: 0.001)")
     parser.add_argument("--max-slippage", type=str, default="0.00005", help="Max allowed slippage for depth aggregation as fraction of best price (default: 0.00005 = 0.005%% = 万0.5)")
+    parser.add_argument("--trade-cooldown", type=float, default=2.0, help="Seconds to wait after each trade pair before re-evaluating signals (default: 2.0)")
     parser.add_argument("--web-port", type=int, default=8080, help="Web dashboard port (default: 8080)")
 
     args = parser.parse_args()
