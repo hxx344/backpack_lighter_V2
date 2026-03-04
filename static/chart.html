@@ -5,7 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>BP-Lighter 价差监控</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+<script>if(typeof Chart==='undefined'){document.write('<script src="https://unpkg.com/chart.js@4.4.7/dist/chart.umd.min.js"><\/script>')}</script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+<script>if(typeof Chart!=='undefined'&&!Chart._adapters?.date){document.write('<script src="https://unpkg.com/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"><\/script>')}</script>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   html, body { height: 100%; overflow: hidden; }
@@ -89,10 +91,13 @@ const MAX_DISPLAY = 3600;
 let lastTimestamp = 0;
 let allPoints = [];
 let allTrades = [];
+let chartsReady = false;
 
+let spreadChart, posChart;
+try {
 // ---- Spread Chart ----
 const spreadCtx = document.getElementById('spreadChart').getContext('2d');
-const spreadChart = new Chart(spreadCtx, {
+spreadChart = new Chart(spreadCtx, {
   type: 'line',
   data: {
     datasets: [
@@ -202,7 +207,7 @@ const spreadChart = new Chart(spreadCtx, {
 
 // ---- Position Chart ----
 const posCtx = document.getElementById('posChart').getContext('2d');
-const posChart = new Chart(posCtx, {
+posChart = new Chart(posCtx, {
   type: 'line',
   data: {
     datasets: [
@@ -248,8 +253,15 @@ const posChart = new Chart(posCtx, {
     }
   }
 });
+chartsReady = true;
+} catch(e) {
+  console.error('Chart.js initialization failed:', e);
+  document.getElementById('conn-status').textContent = 'Chart.js 加载失败，请检查网络';
+  document.getElementById('conn-dot').className = 'status-dot err';
+}
 
 function updateCharts() {
+  if (!chartsReady) return;
   // Trim to MAX_DISPLAY
   if (allPoints.length > MAX_DISPLAY) {
     allPoints = allPoints.slice(-MAX_DISPLAY);
@@ -258,8 +270,8 @@ function updateCharts() {
   const spreadData = allPoints.map(p => ({ x: p.t, y: p.spread }));
   const longSigData = allPoints.map(p => ({ x: p.t, y: p.long_sig }));
   const shortSigData = allPoints.map(p => ({ x: p.t, y: p.short_sig }));
-  const longThData = allPoints.map(p => ({ x: p.t, y: p.long_th }));
-  const shortThData = allPoints.map(p => ({ x: p.t, y: p.short_th }));
+  const longThData = allPoints.filter(p => p.long_th != null).map(p => ({ x: p.t, y: p.long_th }));
+  const shortThData = allPoints.filter(p => p.short_th != null).map(p => ({ x: p.t, y: p.short_th }));
 
   // Map trades to spread value (find nearest point)
   const longTrades = allTrades.filter(t => t.side === 'long_bp').map(t => {

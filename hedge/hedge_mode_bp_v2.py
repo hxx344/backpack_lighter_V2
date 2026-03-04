@@ -1565,18 +1565,32 @@ class HedgeBot:
                 await asyncio.sleep(1)
                 continue
 
+            # Compute mid prices early so chart data can always be recorded
+            lighter_mid = (self.lighter_best_bid + self.lighter_best_ask) / 2
+            bp_mid = (self.backpack_best_bid + self.backpack_best_ask) / 2
+            current_spread = lighter_mid - bp_mid
+
+            # Record spread history for threshold calculation
+            self.spread_history.append(current_spread)
+
+            # Record chart data point for frontend visualization (always, even during warmup/cooldown)
+            chart_point = {
+                "t": int(time.time() * 1000),  # milliseconds timestamp
+                "spread": float(current_spread),
+                "long_sig": float(self.lighter_best_bid - self.backpack_best_ask),
+                "short_sig": float(self.lighter_best_ask - self.backpack_best_bid),
+                "long_th": None,   # will be set once warmup completes
+                "short_th": None,
+                "bp_pos": float(self.backpack_position),
+                "lt_pos": float(self.lighter_position),
+            }
+
             # Trade cooldown: skip signal evaluation if we just traded
             time_since_trade = time.time() - self.last_trade_time
             if time_since_trade < self.trade_cooldown:
+                self.chart_data.append(chart_point)
                 await asyncio.sleep(0.5)
                 continue
-
-            # Record spread using mid prices for symmetry between long/short directions
-            # Using bid-only spread causes asymmetry: reducing position requires overcoming
-            # Lighter's wider bid-ask spread, making it structurally harder to trigger.
-            lighter_mid = (self.lighter_best_bid + self.lighter_best_ask) / 2
-            bp_mid = (self.backpack_best_bid + self.backpack_best_ask) / 2
-            self.spread_history.append(lighter_mid - bp_mid)
 
             if len(self.spread_history) >= 200:
                 data = list(self.spread_history)
@@ -1586,6 +1600,7 @@ class HedgeBot:
                 # Log thresholds to JSON file
                 self.log_thresholds_to_json(long_bp_threshold, short_bp_threshold)
             else:
+                self.chart_data.append(chart_point)
                 if log_position:
                     self.logger.info(f"logging spread history (warm-up). {len(self.spread_history)}/200")
                     self.logger.info(f"best bid: {self.lighter_best_bid} | best ask: {self.lighter_best_ask}")
@@ -1637,18 +1652,10 @@ class HedgeBot:
                 # Need to go short (sell BP) to reduce long position
                 effective_short_threshold = short_bp_threshold - threshold_relaxation
 
-            # Record chart data point for frontend visualization
-            current_spread = lighter_mid - bp_mid
-            self.chart_data.append({
-                "t": int(time.time() * 1000),  # milliseconds timestamp
-                "spread": float(current_spread),
-                "long_sig": float(self.lighter_best_bid - self.backpack_best_ask),    # actual long signal: crosses above red line = trigger
-                "short_sig": float(self.lighter_best_ask - self.backpack_best_bid),   # actual short signal: crosses below blue line = trigger
-                "long_th": float(effective_long_threshold),
-                "short_th": float(-effective_short_threshold),  # negate for chart: short threshold is compared as spread > -threshold
-                "bp_pos": float(self.backpack_position),
-                "lt_pos": float(self.lighter_position),
-            })
+            # Update chart data point with computed thresholds and append
+            chart_point["long_th"] = float(effective_long_threshold)
+            chart_point["short_th"] = float(-effective_short_threshold)  # negate for chart
+            self.chart_data.append(chart_point)
 
             # Determine which directions are allowed based on position limits
             # When at max long, ONLY allow short (reduce); when at max short, ONLY allow long (reduce)
