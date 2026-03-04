@@ -316,50 +316,20 @@ class HedgeBot:
         lt_total_volume = self.lt_buy_cost_quote + self.lt_sell_revenue_quote
         combined_volume = bp_total_volume + lt_total_volume
 
-        # Calculate realized P&L per exchange (only matched portion counts)
-        # Realized = matched_qty * (avg_sell_price - avg_buy_price)
-        # Unmatched portion is unrealized (open position from trades)
-        bp_realized_pnl = Decimal('0')
-        if self.bp_buy_volume_base > 0 and self.bp_sell_volume_base > 0:
-            matched_qty = min(self.bp_buy_volume_base, self.bp_sell_volume_base)
-            avg_buy = self.bp_buy_cost_quote / self.bp_buy_volume_base
-            avg_sell = self.bp_sell_revenue_quote / self.bp_sell_volume_base
-            bp_realized_pnl = matched_qty * (avg_sell - avg_buy)
+        # Fetch P&L data from exchange APIs
+        bp_pos_info = self.get_backpack_position_details()
+        lt_pos_info = self.get_lighter_position_details()
 
-        lt_realized_pnl = Decimal('0')
-        if self.lt_buy_volume_base > 0 and self.lt_sell_volume_base > 0:
-            matched_qty = min(self.lt_buy_volume_base, self.lt_sell_volume_base)
-            avg_buy = self.lt_buy_cost_quote / self.lt_buy_volume_base
-            avg_sell = self.lt_sell_revenue_quote / self.lt_sell_volume_base
-            lt_realized_pnl = matched_qty * (avg_sell - avg_buy)
+        bp_entry_price = bp_pos_info.get('entry_price', Decimal('0'))
+        bp_realized_pnl = bp_pos_info.get('realized_pnl', Decimal('0'))
+        bp_unrealized = bp_pos_info.get('unrealized_pnl', Decimal('0'))
 
-        # Combined realized P&L across both exchanges (hedging pair P&L)
-        # For a hedging bot: buy on one exchange, sell on the other
-        # Combined realized = matched_qty * (avg_sell_all - avg_buy_all)
-        total_buy_base = self.bp_buy_volume_base + self.lt_buy_volume_base
-        total_sell_base = self.bp_sell_volume_base + self.lt_sell_volume_base
-        total_buy_cost = self.bp_buy_cost_quote + self.lt_buy_cost_quote
-        total_sell_revenue = self.bp_sell_revenue_quote + self.lt_sell_revenue_quote
+        lt_entry_price = lt_pos_info.get('entry_price', Decimal('0'))
+        lt_realized_pnl = lt_pos_info.get('realized_pnl', Decimal('0'))
+        lt_unrealized = lt_pos_info.get('unrealized_pnl', Decimal('0'))
 
-        combined_realized_pnl = Decimal('0')
-        if total_buy_base > 0 and total_sell_base > 0:
-            matched_qty = min(total_buy_base, total_sell_base)
-            avg_buy_all = total_buy_cost / total_buy_base
-            avg_sell_all = total_sell_revenue / total_sell_base
-            combined_realized_pnl = matched_qty * (avg_sell_all - avg_buy_all)
-
-        # Unrealized P&L based on current positions and mid prices
-        bp_unrealized = Decimal('0')
-        lt_unrealized = Decimal('0')
-        if self.backpack_best_bid and self.backpack_best_ask:
-            bp_mid = (self.backpack_best_bid + self.backpack_best_ask) / 2
-            bp_unrealized = self.backpack_position * bp_mid
-        if self.lighter_best_bid and self.lighter_best_ask:
-            lt_mid = (self.lighter_best_bid + self.lighter_best_ask) / 2
-            lt_unrealized = self.lighter_position * lt_mid
-
+        combined_realized_pnl = bp_realized_pnl + lt_realized_pnl
         total_unrealized = bp_unrealized + lt_unrealized
-        # Estimated total P&L = combined realized + unrealized
         estimated_pnl = combined_realized_pnl + total_unrealized
 
         total_trades = self.bp_trade_count + self.lt_trade_count
@@ -382,8 +352,9 @@ class HedgeBot:
         self.logger.info(f"   交易额: {lt_total_volume:.2f} USDT | 已实现盈亏: {lt_realized_pnl:+.4f} USDT")
         self.logger.info("-"*60)
         self.logger.info(f"💰 合计: 交易 {total_trades} 笔 | 总交易额: {combined_volume:.2f} USDT")
-        self.logger.info(f"   跨所对冲已实现盈亏: {combined_realized_pnl:+.4f} USDT")
-        self.logger.info(f"   未实现盈亏: {total_unrealized:+.4f} USDT (BP仓位: {self.backpack_position} | LT仓位: {self.lighter_position})")
+        self.logger.info(f"   跨所对冲已实现盈亏: {combined_realized_pnl:+.4f} USDT (BP: {bp_realized_pnl:+.4f} | LT: {lt_realized_pnl:+.4f})")
+        self.logger.info(f"   未实现盈亏: {total_unrealized:+.4f} USDT (BP: {bp_unrealized:+.4f} @ entry {bp_entry_price:.2f} | LT: {lt_unrealized:+.4f} @ entry {lt_entry_price:.2f})")
+        self.logger.info(f"   仓位: BP {self.backpack_position} | LT {self.lighter_position}")
         self.logger.info(f"   估计总盈亏: {estimated_pnl:+.4f} USDT")
         self.logger.info("-"*60)
         bp_bal_str = f"{self.bp_balance:.2f} USDC" if self.bp_balance and self.bp_balance >= 0 else "获取失败"
@@ -468,7 +439,8 @@ class HedgeBot:
         try:
             filled_base = Decimal(order_data["filled_base_amount"])
             filled_quote = Decimal(order_data["filled_quote_amount"])
-            order_data["avg_filled_price"] = filled_quote / filled_base
+            avg_fill_price = filled_quote / filled_base
+            order_data["avg_filled_price"] = avg_fill_price
             if order_data["is_ask"]:
                 order_data["side"] = "SHORT"
                 order_type = "OPEN"
@@ -1243,6 +1215,72 @@ class HedgeBot:
             sys.exit(1)
 
         return current_position
+
+    def get_backpack_position_details(self) -> dict:
+        """Get Backpack position details via GET /api/v1/position.
+
+        Response format (from API docs):
+        [{
+            "entryPrice": "...",
+            "netQuantity": "...",
+            "pnlRealized": "...",
+            "pnlUnrealized": "...",
+            "breakEvenPrice": "...",
+            ...
+        }]
+        """
+        result = {'entry_price': Decimal('0'), 'realized_pnl': Decimal('0'), 'unrealized_pnl': Decimal('0')}
+        try:
+            if self.backpack_client and hasattr(self.backpack_client, 'account_client'):
+                positions_data = self.backpack_client.account_client.get_open_positions()
+                if isinstance(positions_data, list):
+                    for pos in positions_data:
+                        if pos.get('symbol', '') == self.backpack_contract_id:
+                            entry_price = pos.get('entryPrice')
+                            if entry_price is not None:
+                                result['entry_price'] = Decimal(str(entry_price))
+                            realized = pos.get('pnlRealized')
+                            if realized is not None:
+                                result['realized_pnl'] = Decimal(str(realized))
+                            unrealized = pos.get('pnlUnrealized')
+                            if unrealized is not None:
+                                result['unrealized_pnl'] = Decimal(str(unrealized))
+                            break
+        except Exception as e:
+            self.logger.warning(f"⚠️ Failed to get Backpack position details: {e}")
+        return result
+
+    def get_lighter_position_details(self) -> dict:
+        """Get Lighter position details via GET /api/v1/account.
+
+        Position fields from API:
+            avg_entry_price, realized_pnl, unrealized_pnl, position, sign
+        """
+        result = {'entry_price': Decimal('0'), 'realized_pnl': Decimal('0'), 'unrealized_pnl': Decimal('0')}
+        try:
+            url = f"{self.lighter_base_url}/api/v1/account"
+            headers = {"accept": "application/json"}
+            params = {"by": "index", "value": self.account_index}
+            response = requests.get(url, headers=headers, params=params, timeout=10)
+            response.raise_for_status()
+            data = response.json()
+            if 'accounts' in data and data['accounts']:
+                positions = data['accounts'][0].get('positions', [])
+                for pos in positions:
+                    if pos.get('symbol') == self.ticker:
+                        entry_price = pos.get('avg_entry_price')
+                        if entry_price is not None:
+                            result['entry_price'] = Decimal(str(entry_price))
+                        realized = pos.get('realized_pnl')
+                        if realized is not None:
+                            result['realized_pnl'] = Decimal(str(realized))
+                        unrealized = pos.get('unrealized_pnl')
+                        if unrealized is not None:
+                            result['unrealized_pnl'] = Decimal(str(unrealized))
+                        break
+        except Exception as e:
+            self.logger.warning(f"⚠️ Failed to get Lighter position details: {e}")
+        return result
 
     def get_backpack_balance(self) -> Decimal:
         """Get Backpack account net equity via GET /api/v1/capital/collateral.
