@@ -201,6 +201,14 @@ class HedgeBot:
         self.bp_balance = None   # Backpack account total balance (USDC)
         self.lt_balance = None   # Lighter account collateral (USDC)
 
+        # Trade cooldown: prevent rapid oscillation after each trade pair
+        self.last_trade_time = 0.0       # timestamp of last executed trade pair
+        self.trade_cooldown = 2.0        # seconds to wait after a trade before re-evaluating signals
+
+        # Deduplication: prevent processing the same fill event twice
+        self.processed_lighter_orders = set()  # set of processed Lighter client_order_ids
+        self.processed_bp_order_ids = set()    # set of processed Backpack order_ids
+
         # Chart data for frontend visualization
         self.chart_data = deque(maxlen=7200)  # ~1 hour at 0.5s interval
         self.trade_events = deque(maxlen=200)  # Recent trade markers
@@ -437,6 +445,15 @@ class HedgeBot:
     def handle_lighter_order_result(self, order_data):
         """Handle Lighter order result from WebSocket."""
         try:
+            # Dedup: skip if this order was already processed
+            client_order_id = order_data.get("client_order_id")
+            if client_order_id in self.processed_lighter_orders:
+                return
+            self.processed_lighter_orders.add(client_order_id)
+            # Keep set bounded (remove oldest entries if too large)
+            if len(self.processed_lighter_orders) > 500:
+                self.processed_lighter_orders = set(list(self.processed_lighter_orders)[-200:])
+
             filled_base = Decimal(order_data["filled_base_amount"])
             filled_quote = Decimal(order_data["filled_quote_amount"])
             avg_fill_price = filled_quote / filled_base
@@ -975,6 +992,10 @@ class HedgeBot:
                 if status == 'CANCELED' and filled_size > 0:
                     status = 'FILLED'
 
+                # Dedup: skip if this order_id was already fully processed
+                if status == 'FILLED' and order_id in self.processed_bp_order_ids:
+                    return
+
                 # Handle the order update
                 if status == 'FILLED' and self.backpack_order_status != 'FILLED':
                     trade_price = Decimal(price) if price else Decimal('0')
@@ -995,6 +1016,10 @@ class HedgeBot:
                         self.bp_sell_revenue_quote += trade_value
                     self.logger.info(f"[{order_id}] [{order_type}] [Backpack] [{status}]: {filled_size} @ {price}")
                     self.backpack_order_status = status
+                    self.processed_bp_order_ids.add(order_id)
+                    # Keep set bounded
+                    if len(self.processed_bp_order_ids) > 500:
+                        self.processed_bp_order_ids = set(list(self.processed_bp_order_ids)[-200:])
                     if filled_size > Decimal('0.0001'):
                         self.log_trade_to_csv(
                             exchange='Backpack',
@@ -1532,6 +1557,12 @@ class HedgeBot:
                 await asyncio.sleep(1)
                 continue
 
+            # Trade cooldown: skip signal evaluation if we just traded
+            time_since_trade = time.time() - self.last_trade_time
+            if time_since_trade < self.trade_cooldown:
+                await asyncio.sleep(0.5)
+                continue
+
             # Record spread using mid prices for symmetry between long/short directions
             # Using bid-only spread causes asymmetry: reducing position requires overcoming
             # Lighter's wider bid-ask spread, making it structurally harder to trigger.
@@ -1665,6 +1696,7 @@ class HedgeBot:
                         self.place_lighter_market_order('sell', order_quantity)
                     )
                     self.trade_events.append({"t": int(time.time() * 1000), "side": "long_bp", "qty": float(order_quantity)})
+                    self.last_trade_time = time.time()
                 except Exception as e:
                     self.logger.error(f"⚠️ Error in trading loop: {e}")
                     self.logger.error(f"⚠️ Full traceback: {traceback.format_exc()}")
@@ -1689,6 +1721,7 @@ class HedgeBot:
                         self.place_lighter_market_order('buy', order_quantity)
                     )
                     self.trade_events.append({"t": int(time.time() * 1000), "side": "short_bp", "qty": float(order_quantity)})
+                    self.last_trade_time = time.time()
                 except Exception as e:
                     self.logger.error(f"⚠️ Error in trading loop: {e}")
                     self.logger.error(f"⚠️ Full traceback: {traceback.format_exc()}")
@@ -1802,6 +1835,7 @@ if __name__ == "__main__":
     bot.threshold_relax_rate = Decimal(args.relax_rate)
     bot.threshold_relax_cap = Decimal(args.relax_cap)
     bot.max_slippage = Decimal(args.max_slippage)
+    bot.trade_cooldown = args.trade_cooldown
     bot.web_port = args.web_port
 
     asyncio.run(bot.run())
